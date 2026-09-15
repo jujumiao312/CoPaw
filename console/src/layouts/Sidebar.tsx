@@ -302,7 +302,13 @@ export default function Sidebar({
       key: "analytics-claw-data-overview",
       icon: <SparkBarChartLine size={18} />,
       path: "/analytics/claw-data-overview",
-      label: t("nav.analyticsClawDataOverview", "Claw技能运行看板"),
+      label: t("nav.analyticsClawDataOverview", "Claw数据看板"),
+    },
+    {
+      key: "analytics-claw-skill-data-overview",
+      icon: <SparkBarChartLine size={18} />,
+      path: "/analytics/claw-skill-data-overview",
+      label: t("nav.analyticsClawSkillDataOverview", "Claw技能运行看板"),
     },
     ...(canManageCurrentSourceConfig
       ? [
@@ -530,7 +536,14 @@ export default function Sidebar({
           key: "analytics-claw-data-overview",
           label: collapsed
             ? null
-            : t("nav.analyticsClawDataOverview", "Claw技能运行看板"),
+            : t("nav.analyticsClawDataOverview", "Claw数据看板"),
+          icon: <SparkBarChartLine size={16} />,
+        },
+        {
+          key: "analytics-claw-skill-data-overview",
+          label: collapsed
+            ? null
+            : t("nav.analyticsClawSkillDataOverview", "Claw技能运行看板"),
           icon: <SparkBarChartLine size={16} />,
         },
         ...(canManageCurrentSourceConfig
