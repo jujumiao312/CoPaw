@@ -6,6 +6,7 @@ import TracesPage from "./Traces";
 import BusinessOverviewPage from "./BusinessOverview";
 import CronJobOverviewPage from "./CronJobOverview";
 import ClawDataOverviewPage from "./ClawDataOverview";
+import ClawSkillDataOverview from "./ClawSkillDataOverview";
 import ContinuousGovernancePage from "./ContinuousGovernance";
 
 export default function AnalyticsPage() {
@@ -18,6 +19,7 @@ export default function AnalyticsPage() {
       <Route path="traces" element={<TracesPage />} />
       <Route path="business-overview" element={<BusinessOverviewPage />} />
       <Route path="claw-data-overview" element={<ClawDataOverviewPage />} />
+      <Route path="claw-skill-data-overview" element={<ClawSkillDataOverview />} />
       <Route path="cron-job-overview" element={<CronJobOverviewPage />} />
       <Route
         path="continuous-governance"
