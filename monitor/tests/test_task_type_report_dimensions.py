@@ -162,9 +162,8 @@ def test_skills_are_distinct_by_id_not_name_and_source(dimension_db, scope):
     )
 
 
-def test_skill_detail_filters_catalog_without_changing_summary(
-    dimension_db, scope
-):
+def test_skill_detail_and_summary_share_stat_skill_scope(dimension_db, scope):
+    """技能目录与汇总共用统计技能口径：全部关掉统计开关后推送口径为空。"""
     dimension_db.execute(
         "UPDATE swe_marketplace_skills SET include_in_statistics = 0 WHERE skill_id = 'k2'"
     )
@@ -179,10 +178,14 @@ def test_skill_detail_filters_catalog_without_changing_summary(
         "UPDATE swe_marketplace_skills SET include_in_statistics = 0"
     )
     assert assemble(execute(dimension_db, scoped), "branch", True) == []
-    assert (
-        assemble(execute(dimension_db, scope), "overall")[0]["suc_execute_job"]
-        == 1
-    )
+    summary = {
+        row["task_type"]: row
+        for row in assemble(execute(dimension_db, scope), "overall")
+    }
+    assert summary["push_plan"]["suc_execute_job"] == 0
+    assert summary["push_other"]["suc_execute_job"] == 0
+    # 主动提问链路只按非空 skill_id 分类，不读取 job 的统计开关。
+    assert summary["ask_plan"]["suc_execute_job"] == 2
 
 
 @pytest.mark.asyncio
@@ -259,7 +262,7 @@ def test_permission_denominator_repeats_per_skill(dimension_db, scope):
     assert find_row(rows, skill="k1")["suc_execute_job"] == 1
 
 
-def test_skill_detail_keeps_deleted_job_and_click_time_rules(
+def test_skill_detail_excludes_deleted_job_and_keeps_click_time_rules(
     dimension_db, scope
 ):
     scoped = replace(scope, group_by="manager", skill_detail=True)
@@ -267,11 +270,14 @@ def test_skill_detail_keeps_deleted_job_and_click_time_rules(
         "UPDATE swe_cron_jobs SET status='deleted', deleted_at='2026-09-14' WHERE id='j1'"
     )
     rows = assemble(execute(dimension_db, scoped), "manager", True)
-    push = find_row(rows, user="alice", skill="k1")
-    assert push["suc_execute_job"] == 1
-    assert push["recommended_customers"] == 2
-    assert push["skill_count"] == push["active_manager_count"] == 0
-    assert push["read_customer_count"] == 0
+    plan = find_row(rows, user="alice", skill="k1")
+    assert plan["suc_execute_job"] == 0
+    assert plan["recommended_customers"] == 0
+    assert plan["skill_count"] == plan["active_manager_count"] == 0
+    assert plan["read_customer_count"] == 0
+    other = find_row(rows, task="push_other", user="alice", skill="k1")
+    assert other["suc_execute_job"] == other["read_tasks"] == 1
+    assert other["skill_count"] == other["active_manager_count"] == 1
     ask = find_row(rows, task="ask_plan", user="alice", skill="k1")
     assert ask["suc_execute_job"] == 2
     assert (

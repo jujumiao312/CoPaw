@@ -75,6 +75,8 @@
 
 空 trace_id 的推送无法关联子任务，若成功可进入 push_other；空 trace_id 的点击和主动提问不进入统计。执行多次复用 trace 时，执行次数按 e.id 保留，客户/点击按客户去重，不能强行把执行数也改为 DISTINCT trace。
 
+推送任务集合（push_plan 与 push_other 的共同来源）：在 `j.source_id` 与 `e.actual_time` 窗口基础上，要求所属 job `deleted_at IS NULL`、`status <> 'deleted'`，且 `j.skill_ids` 中至少有一个当前 source 下 `include_in_statistics = 1` 的统计技能（`FIND_IN_SET`）。推送侧的计数、技能、活跃、方案客户与分页维度键都从这个集合出发：任一条件不满足的执行（job 已删除、绑定技能全部关闭统计开关）整条不进入推送口径。
+
 ## 3. 十四字段矩阵
 
 以下所有“去重”均为当前查询范围 + 当前机构分组 + 当前任务类型内的去重。
@@ -85,10 +87,10 @@
 | 2 skill_count | 基础执行关联未删除 job，统计开关=1的绑定技能，DISTINCT skill_id | 窗口内合格 Span 技能匹配相同 source 的统计技能，DISTINCT skill_id | 同左推送规则 |
 | 3 permission_manager_count | 名单内在当前 source 有 tenant_init_source 记录的 DISTINCT user_id；同机构三行相同 | 同左 | 同左 |
 | 4 active_manager_count | 当前未删除 active job，在窗口内有本类型执行，按 job owner 去重 | null，不计算 | 同左推送规则 |
-| 5 suc_execute_job | 基础执行中 status=success AND async_status=success 的条数 | 合格 Span 的 COUNT(DISTINCT sp.trace_id)，不筛选状态 | 基础集合条数 |
-| 6 read_tasks | 基础执行中 is_read=1 条数，保留原 SQL，不另外要求成功 | 直接等于该类型 suc_execute_job | 基础执行中 is_read=1 条数 |
+| 5 suc_execute_job | 推送任务集合中 status=success AND async_status=success 的条数 | 合格 Span 的 COUNT(DISTINCT sp.trace_id)，不筛选状态 | 推送任务集合条数 |
+| 6 read_tasks | 推送任务集合中 is_read=1 条数，保留原 SQL，不另外要求成功 | 直接等于该类型 suc_execute_job | 推送任务集合中 is_read=1 条数 |
 | 7 read_rate | 6/5×100 | 6/5×100 | 6/5×100 |
-| 8 recommended_customers | 基础执行关联子任务 DISTINCT 非空 custuid，job 至少绑定一个统计技能 | 合格 Span 关联的子任务 DISTINCT 非空 custuid，不额外加统计开关 | null |
+| 8 recommended_customers | 推送任务集合关联子任务 DISTINCT 非空 custuid | 合格 Span 关联的子任务 DISTINCT 非空 custuid，不额外加统计开关 | null |
 | 9 read_customer_count | 当期点击人属于名单，preview_view + sub，DISTINCT customer_id；见点击规则 | 同左事件规则，通过 Span 关联统计技能 | null |
 | 10 plan_read_rate | 9/8×100 | 9/8×100 | null |
 | 11 insight_customer_count | 当期名单人员 button_click + insight，DISTINCT customer_id | 同左，主动关联规则 | null |
@@ -102,21 +104,23 @@
 
 ### 3.1 历史状态与删除过滤
 
-本版保留原需求的指标级差异：
+本版保留原需求的指标级差异，其中推送侧统一限定「未删除 job + 至少绑定一个统计技能」：
 
 | 查询 | job 删除过滤 | success 过滤 | 统计技能开关 |
 | --- | --- | --- | --- |
-| 推送任务计数/已读 | 不加；仍需 job 行以识别 source | 成功数加；已读不加 | 不加 |
+| 推送任务计数/已读 | 加 | 成功数加；已读不加 | 加 |
 | 推送技能数 | 加 | 基础分类之外不加 | 加 |
-| 活跃人数 | 未删除且当前 active | 基础分类之外不加 | 不加 |
-| 推送客户方案客户数 | 不加 | 基础分类之外不加 | 加 |
+| 活跃人数 | 未删除且当前 active | 基础分类之外不加 | 加 |
+| 推送客户方案客户数 | 加 | 基础分类之外不加 | 加 |
 | 推送客户级点击 | 加 | 不加 | 加 |
 | 主动任务计数/已读 | 无 job | 不加状态过滤，已读等于成功数 | 分类仅非空 skill_id |
 | 主动技能数 | 无 job | 不加 | 加 |
 | 主动客户方案客户数 | 无 job | 不加 | 不加 |
 | 主动客户级点击 | 无 job | 不加 | 加 |
 
-因此不同列不一定对应同一批成功任务。删除 job、修改统计技能开关、后补子任务、后续已读都会影响历史报表；本接口不是不可变的历史快照。job 被物理删除且执行表无 source 时，当前实现无法归属该执行，应作为数据质量检查记录，而非用请求 source 强行补填。
+2026-09-16 修正（推送口径收窄）：推送侧四条事实路径共用同一个 `push` 子查询，统一在子查询内限制 `j.deleted_at IS NULL AND j.status <> 'deleted'` 且 job 至少绑定一个 `include_in_statistics = 1` 的统计技能，因此删除 job 的执行、方案、技能、活跃与维度骨架同时消失；此前「推送任务计数/已读与方案客户数不删删除 job」的差异作废。主动提问链路没有 job，不受该开关影响（`ask_skills` 仍按统计技能筛选，`ask_tasks`/`ask_customers` 仅要求非空 skill_id）。
+
+因此不同列不一定对应同一批成功任务：push 侧四类事实同属一个任务集合，但仍与 ask 侧、点击事件窗口不同源。删除 job 或修改统计技能开关、后补子任务、后续已读都会影响历史报表；本接口不是不可变的历史快照。job 被物理删除且执行表无 source 时，当前实现无法归属该执行，应作为数据质量检查记录，而非用请求 source 强行补填。
 
 ## 4. 时间与比例
 

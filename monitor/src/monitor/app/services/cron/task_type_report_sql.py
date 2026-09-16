@@ -240,6 +240,13 @@ def build_queries(
                 AND sp.skill_id = kd.skill_id
             )))"""
     has_sub = "EXISTS (SELECT 1 FROM swe_cron_subtasks s WHERE s.trace_id = e.trace_id AND e.trace_id <> '')"
+    # 推送侧事实的唯一来源：未删除且至少绑定一个统计技能的任务。
+    push_job_scope = """j.deleted_at IS NULL AND j.status <> 'deleted'
+        AND EXISTS (SELECT 1 FROM swe_marketplace_skills sk
+            WHERE sk.source_id = j.source_id
+            AND sk.include_in_statistics = 1
+            AND sk.skill_id IS NOT NULL AND sk.skill_id <> ''
+            AND FIND_IN_SET(sk.skill_id, j.skill_ids))"""
     push = f"""SELECT e.id, e.trace_id, e.tenant_id AS user_id,
         e.status, e.async_status, e.is_read, j.id AS job_id,
         j.tenant_id AS job_user_id, j.source_id, j.skill_ids,
@@ -247,6 +254,7 @@ def build_queries(
         CASE WHEN {has_sub} THEN 'push_plan' ELSE 'push_other' END AS task_type
         FROM swe_cron_executions e JOIN swe_cron_jobs j ON j.id = e.job_id
         WHERE j.source_id = :source_id AND e.actual_time >= :start AND e.actual_time < :stop
+        AND {push_job_scope}
         AND ({has_sub} OR (e.status = 'success' AND e.async_status = 'success'))"""
     ask_qualifier = """sp.trace_id <> ''
         AND sp.skill_id IS NOT NULL AND sp.skill_id <> ''

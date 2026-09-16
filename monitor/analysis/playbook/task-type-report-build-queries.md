@@ -137,7 +137,7 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
    统一产出 `dims = "{bbk} AS group_bbk, {org} AS group_org"` 与 `groups = "group_bbk, group_org"`。用空字符串常量而非 `NULL` 占位，使整体维度退化为单组，同时保持所有查询的列结构一致。
 
 3. **两个基础集合 `push` / `ask`（第 64-81 行）**
-   - `push`：`swe_cron_executions e JOIN swe_cron_jobs j`，时间窗用 `e.actual_time`，并在派生表内用 `CASE WHEN {has_sub}` 打好 `push_plan` / `push_other` 标签。
+   - `push`：`swe_cron_executions e JOIN swe_cron_jobs j`，时间窗用 `e.actual_time`，只保留 `j.deleted_at IS NULL AND j.status <> 'deleted'` 且 job 至少绑定一个 `include_in_statistics = 1` 统计技能的执行（`push_job_scope`），再用 `CASE WHEN {has_sub}` 打好 `push_plan` / `push_other` 标签。推送任务的计数、技能、活跃、方案客户与分页维度键都来自这个集合，改这里的过滤会同时影响这批指标。
    - `ask`：`swe_tracing_spans sp`，时间窗用 `sp.start_time`。`ask_qualifier` 的四个条件是分类关键：有非空 skill span、有子任务、且**不存在同 trace 的 cron execution**，从而与 push 互斥。
 
 4. **可复用的布尔谓词片段**
@@ -161,7 +161,7 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
 | 2 | `permissions` | 2 | `group_bbk`、`group_org`、`first_bbk_name`、`org_name`、`permission_manager_count` | **唯一不带 `task_type` 的查询，提供元数据与权限人数**；`assemble` 只对事实中出现的维度补齐三类任务。无事实时 `query_core` 跳过此查询并返回空列表 |
 | 3 | `push_tasks` | 4 | 维度 + `task_type`、`suc_execute_job`、`read_tasks` | 执行侧按 `p.user_id` 用名单 `EXISTS` 过滤 |
 | 4 | `ask_tasks` | 4 | 维度 + `ask_plan`、`suc_execute_job`、`read_tasks` | 成功数和已读数均为 `COUNT(DISTINCT sp.trace_id)`，不依赖 Trace 表、has_error 或阅读埋点 |
-| 5 | `active` | 4 | 维度 + `task_type`、`active_manager_count` | `COUNT(DISTINCT p.job_user_id)`，条件 `job_status='active' AND deleted_at IS NULL`；**按任务归属人而非执行人匹配名单** |
+| 5 | `active` | 4 | 维度 + `task_type`、`active_manager_count` | `COUNT(DISTINCT p.job_user_id)`，条件 `job_status='active' AND deleted_at IS NULL`（`push` 已保证未删除且有统计技能）；**按任务归属人而非执行人匹配名单** |
 | 6 | `push_skills` | 4 | 维度 + `task_type`、`skill_count` | `DISTINCT k.skill_id`，要求 `include_in_statistics=1`，且排除已删除 job |
 | 7 | `ask_skills` | 4 | 维度 + `ask_plan`、`skill_count` | 经 `swe_tracing_spans` 关联统计技能 |
 | 8 | `push_customers` | 4 | 维度 + `push_plan`、`recommended_customers` | `DISTINCT s.custuid`，额外要求 `stat_job`；`WHERE p.task_type = 'push_plan'` 二次收口 |

@@ -232,14 +232,66 @@ def test_ask_not_read_by_other_user_or_exposure(db, scope):
     assert execute(db, scope)["ask_tasks"][0]["read_tasks"] == 2
 
 
-def test_deleted_job_retains_execution_and_customer_history(db, scope):
+def test_deleted_job_is_excluded_from_push_metrics(db, scope):
+    """删除 job 后，它的执行、方案、技能与活跃都不再进入推送口径。"""
     db.execute(
         "UPDATE swe_cron_jobs SET deleted_at = '2026-09-14', status = 'deleted' WHERE id = 'j1'"
     )
-    push = assemble(execute(db, scope), "overall")[0]
-    assert push["suc_execute_job"] == 1 and push["recommended_customers"] == 2
-    assert push["skill_count"] == 0 and push["active_manager_count"] == 0
-    assert push["read_customer_count"] == 0
+    rows = {
+        row["task_type"]: row
+        for row in assemble(execute(db, scope), "overall")
+    }
+    plan, other = rows["push_plan"], rows["push_other"]
+    assert plan["suc_execute_job"] == 0 and plan["read_tasks"] == 0
+    assert plan["recommended_customers"] == 0
+    assert plan["skill_count"] == 0 and plan["active_manager_count"] == 0
+    assert plan["read_customer_count"] == 0
+    # 剩下的未删除 job(j2) 只有一次成功执行，且没有子任务。
+    assert other["suc_execute_job"] == other["read_tasks"] == 1
+    assert other["skill_count"] == other["active_manager_count"] == 1
+
+
+def test_push_cohort_requires_live_job_with_statistical_skill(db, scope):
+    """推送口径只包含未删除且至少绑定一个统计技能的任务。"""
+    db.execute("UPDATE swe_marketplace_skills SET include_in_statistics = 0")
+    db.execute("INSERT INTO swe_marketplace_skills VALUES ('S','k9',1)")
+    rows = {
+        row["task_type"]: row
+        for row in assemble(execute(db, scope), "overall")
+    }
+    assert rows["push_plan"]["suc_execute_job"] == 0
+    assert rows["push_other"]["suc_execute_job"] == 0
+
+    db.execute(
+        "UPDATE swe_marketplace_skills SET include_in_statistics = 1 "
+        "WHERE skill_id = 'k1'"
+    )
+    rows = {
+        row["task_type"]: row
+        for row in assemble(execute(db, scope), "overall")
+    }
+    assert rows["push_plan"]["suc_execute_job"] == 1
+    assert rows["push_other"]["suc_execute_job"] == 1
+
+    # 只改状态、deleted_at 仍为空：同样按删除处理。
+    db.execute("UPDATE swe_cron_jobs SET status = 'deleted' WHERE id = 'j2'")
+    rows = {
+        row["task_type"]: row
+        for row in assemble(execute(db, scope), "overall")
+    }
+    assert rows["push_other"]["suc_execute_job"] == 0
+
+    # 只改 deleted_at、状态仍为 active：同样按删除处理。
+    db.execute(
+        "UPDATE swe_cron_jobs SET status = 'active', "
+        "deleted_at = '2026-09-13' WHERE id = 'j2'"
+    )
+    rows = {
+        row["task_type"]: row
+        for row in assemble(execute(db, scope), "overall")
+    }
+    assert rows["push_other"]["suc_execute_job"] == 0
+    assert rows["push_plan"]["suc_execute_job"] == 1
 
 
 def test_anti_join_uses_all_execution_history(db, scope):
