@@ -1,15 +1,22 @@
 # -*- coding: utf-8 -*-
 """范围、名单选项、维度键分页及全量 XLSX 的真实服务集成验证。"""
 
+import asyncio
 from io import BytesIO
 
 import httpx
 from openpyxl import load_workbook
 import pytest
 
-from .test_task_type_report_queries import db as db, service_db as service_db
+from .test_task_type_report_queries import (
+    AsyncQueryDb,
+    db as db,
+    request_params,
+    service_db as service_db,
+)
 from .test_task_type_report_dimensions import dimension_db as dimension_db
 from monitor.app._app import app
+from monitor.app.services.cron import task_type_report as report_service
 from monitor.app.services.cron import task_type_report_export as export_module
 
 URL = "/api/monitor/cron/task-type-report"
@@ -352,3 +359,43 @@ async def test_page_boundary_splits_one_manager_skills(paged_db, service_db):
         and item["active_manager_count"] is None
         for item in first["items"] + second["items"]
     )
+
+
+class PageKeyQueryDb(AsyncQueryDb):
+    """只统计分页键查询（page_count/page_keys）同时在飞的条数。"""
+
+    def __init__(self, connection):
+        super().__init__(connection)
+        self.key_in_flight = 0
+        self.key_peak = 0
+
+    async def fetch_all(self, sql, params=()):
+        if "dimension_keys" not in sql:
+            return await super().fetch_all(sql, params)
+        self.key_in_flight += 1
+        self.key_peak = max(self.key_peak, self.key_in_flight)
+        try:
+            await asyncio.sleep(0.01)
+            return await super().fetch_all(sql, params)
+        finally:
+            self.key_in_flight -= 1
+
+
+@pytest.mark.asyncio
+async def test_page_total_and_keys_run_concurrently(paged_db, monkeypatch):
+    """总数与本页键取自同一个键子查询，同时取回时不再串行等待两次。"""
+    paged = PageKeyQueryDb(paged_db)
+    monkeypatch.setattr(report_service, "get_db_connection", lambda: paged)
+    result = await report_service.TaskTypeReportService().get_report(
+        request_params(
+            group_by="manager",
+            task_type="push_plan",
+            page=1,
+            page_size=20,
+        ),
+        "S",
+        "001",
+    )
+    assert result.total > 20 and len(result.items) == 20
+    assert result.has_more is True
+    assert paged.key_peak == 2

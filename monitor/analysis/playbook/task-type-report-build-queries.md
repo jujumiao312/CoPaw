@@ -19,19 +19,25 @@
 
 当前口径：名单限定事实范围并提供元数据、权限人数；结果维度来自各指标的期间事实并集。普通经理分页与技能分页都使用推送执行、owner 活跃、Span、点击四条事实路径的 UNION。每个有效维度仍补三类任务，不能用全零指标判断是否有事实。
 
-服务以 INFO 级别记录 `task_type_report_timing`，保持 `MONITOR_LOG_LEVEL=info` 即可。日志不含 SQL、绑定参数或人员信息。筛选同一个 `report_id` 后比较 `elapsed_ms`：
+服务以 INFO 级别记录 `task_type_report_timing`，保持 `MONITOR_LOG_LEVEL=info` 即可。筛选同一个 `report_id` 后比较 `elapsed_ms`：
 
 - `get_report`：方法总耗时，包含响应模型构造，不含路由 JSON 序列化、XLSX 文件生成和网络传输；它包含其他阶段，不能与子阶段相加。该行额外带 `stages`、`slowest`、`slowest_ms`，即本次请求记录了多少阶段、除总耗时外最慢的子阶段是谁；`rows` 为最终返回行数。先看这一行，再决定是否展开逐阶段日志。
-- `resolve_snapshot` / `validate_scope` / `resolve_filters` / `validate_resolved_scope`：快照选择、范围校验和名称解析。
+- `resolve_snapshot` / `validate_scope` / `scope_check` / `resolve_filters` / `resolve_filter` / `validate_resolved_scope`：快照选择、范围校验和名称解析；`scope_check` 与 `resolve_filter` 是本模块里真正执行的校验/解析 SQL，命中条件时才出现。
 - `roster_conflicts` / `permissions` / `push_tasks` / `ask_tasks` / `active` / `push_skills` / `ask_skills` / `push_customers` / `ask_customers` / `clicks`：对应同名 SQL，`rows` 为返回聚合行数。
 - `page_roster_conflicts` / `page_count` / `page_keys`：分页前校验、事实键计数与取页。
 - `assemble`：Python 合并、补齐与排序，`rows` 为输出行数。
 
 `status=ok` 表示正常结束；异常记录异常类型并原样抛出；路由超时取消会记录 `CancelledError`。并发请求用独立 `report_id`，多实例部署同时保留容器/实例日志标签。
 
-正常的非分页请求固定是 11 条查询、15 个阶段（含 `get_report` 自身）；命中名称解析会多一个 `validate_resolved_scope`（16 个阶段）；经理分页请求另有 `page_roster_conflicts` / `page_count` / `page_keys` 三个阶段。阶段数与预期不符时先确认命中的是哪条分支，再查改动。
+正常的非分页请求固定是 11 条查询、15 个阶段（含 `get_report` 自身）；命中名称解析会多 `validate_resolved_scope` / `scope_check` / `resolve_filter`（18 个阶段）；经理分页请求另有 `page_roster_conflicts` / `page_count` / `page_keys` 三个阶段（18 个阶段）。阶段数与预期不符时先确认命中的是哪条分支，再查改动。
 
-数据库调用的计时包含连接池等待、SQL 执行、传输和结果转换，不能直接等同于数据库执行时间。事实查询自 2026-09-16 起按 `REPORT_QUERY_CONCURRENCY`（默认 4）受限并发，可用 `TaskTypeReportService(concurrency=...)` 覆盖，设为 1 即退回全部串行；`roster_conflicts`、`permissions` 和三个分页阶段仍串行。并发只压缩总耗时（从"各查询相加"变成"约等于最慢一批"），不改变查询条数和指标口径。多条查询同时取连接时，阶段耗时会把连接池排队时间算进去，判断数据库侧耗时要结合 EXPLAIN 与连接池指标；需要区分时把并发调回 1 复测即可。
+### SQL 排查日志（2026-09-16）
+
+除 `task_type_report_timing` 外，本模块执行的每条查询再输出一行 `task_type_report_sql`，字段依次为 `report_id`、`query`（查询名，与 `build_queries` 的键一致）、`elapsed_ms`、`status`、`rows`、`sql` 和 `params`。同一 `report_id` 下按 `query` 找到指标名，即可把 SQL 文本、绑定参数和返回行数对上，用于核对"结果不符合预期"时的实际口径。
+
+边界按文件划分：只有 `task_type_report.py` 里编排的查询会打印，名单快照（`QueryService._resolve_jkh_sync_date`）等其它模块的 SQL 不在其中。`sql` 是编译后的文本（`%s` 占位，不含字面量），`params` 是绑定值元组，可能包含用户输入的关键字、机构号和经理 ID，属于敏感排查信息，只用于定位口径差异，不要转发或长期留存。SQL 文本按原样打印，便于直接复制到 EXPLAIN；日志量大时按 `query=` 过滤，或把该 logger 级别调到 WARNING 关闭。
+
+数据库调用的计时包含连接池等待、SQL 执行、传输和结果转换，不能直接等同于数据库执行时间。事实查询自 2026-09-16 起按 `REPORT_QUERY_CONCURRENCY`（默认 4）受限并发，可用 `TaskTypeReportService(concurrency=...)` 覆盖，设为 1 即退回全部串行；`roster_conflicts`、`permissions` 与 `page_roster_conflicts` 仍串行，`page_count` 与 `page_keys` 彼此并发。并发只压缩总耗时（从"各查询相加"变成"约等于最慢一批"），不改变查询条数和指标口径。多条查询同时取连接时，阶段耗时会把连接池排队时间算进去，判断数据库侧耗时要结合 EXPLAIN 与连接池指标；需要区分时把并发调回 1 复测即可。
 
 定位到慢查询名后，在相同 Scope 下取得实际参数化 SQL，通过现有连接执行普通 EXPLAIN：
 
@@ -41,9 +47,13 @@ sql, values = build_queries(scope)["clicks"]
 plan = await db.fetch_all("EXPLAIN " + sql, values)
 ```
 
-`page_count` / `page_keys` 使用 `build_queries(scope, keys_only=True)["keys"]`，并按 `query_page` 的实际 COUNT、ORDER BY、LIMIT/OFFSET 包装后查看执行计划。不要只解释内部键查询，也不要把参数展开到共享日志。
+`page_count` / `page_keys` 使用 `build_queries(scope, keys_only=True)["keys"]`，并按 `query_page` 的实际 COUNT、ORDER BY、LIMIT/OFFSET 包装后查看执行计划；两者日志里的 `sql` / `params` 可直接复用，不要只解释内部键查询。
 
-优先核查计划是否在时间和来源过滤后仍扫描大量行，以及 `EXISTS`、按用户查机构的相关子查询、`FIND_IN_SET`、UNION/DISTINCT 的成本。经理分页会分别执行事实键计数和取页，可能成为新的主要耗时点。若数据库侧执行快但上述调用计时慢，再检查连接池等待及网络；若 `assemble` 慢，查看返回行数及 Python CPU profile。
+优先核查计划是否在时间和来源过滤后仍扫描大量行，以及 `EXISTS`、按用户查机构的相关子查询、`FIND_IN_SET`、UNION/DISTINCT 的成本。经理分页会执行事实键计数和取页两条查询，可能成为新的主要耗时点；两者互不依赖，`query_page` 已用 `asyncio.gather` 并发取回，阶段耗时不再相加，但数据库瞬时压力会翻倍。
+
+分页键自 2026-09-16 起先在事实里对 `(人员, 技能)` 去重，再做名单过滤与机构映射，逐行的机构相关子查询与 `EXISTS` 只跑在去重后的人员上。本地 400 名经理 × 20 次执行的 SQLite 样本（含索引）中，同一键子查询由约 366ms 降到约 200ms，计数与取页结果不变；该样本只验证"减少了每行重复工作"，不是 TDSQL 性能承诺，线上仍以日志和 EXPLAIN 为准。
+
+若数据库侧执行快但上述调用计时慢，再检查连接池等待及网络；若 `assemble` 慢，查看返回行数及 Python CPU profile。
 
 本地 SQLite 测试验证口径、分页、日志关联及取消路径，不代表真实 TDSQL 的执行计划或性能。生产瓶颈需要一次真实请求的分阶段日志和相应 EXPLAIN 才能确认。
 
@@ -163,4 +173,4 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
 
 Linux 使用 `venv/bin/python -m pytest ...`。
 
-`test_task_type_report_queries.py` 覆盖指标与去重、三种分组、筛选绑定与空结果、机构冲突先于筛选、点击人与任务 owner 使用独立名单、主动查看等于成功数且不依赖埋点、删除 job 的历史保留、反连接使用全部执行历史、overall 不等于分行相加，以及比例计算与参数绑定。并发与日志是两项独立契约测试：`test_fact_queries_run_concurrently_with_stable_results` 锁定"并发不改变查询条数与结果、在飞查询数受 `REPORT_QUERY_CONCURRENCY` 限制"，`test_timing_log_names_slowest_stage` 锁定"只有最外层阶段带 `stages` / `slowest` 汇总字段，且阶段数与该 `report_id` 的日志行数一致"。
+`test_task_type_report_queries.py` 覆盖指标与去重、三种分组、筛选绑定与空结果、机构冲突先于筛选、点击人与任务 owner 使用独立名单、主动查看等于成功数且不依赖埋点、删除 job 的历史保留、反连接使用全部执行历史、overall 不等于分行相加，以及比例计算与参数绑定。并发与日志是独立契约测试：`test_fact_queries_run_concurrently_with_stable_results` 锁定"并发不改变查询条数与结果、在飞查询数受 `REPORT_QUERY_CONCURRENCY` 限制"，`test_timing_log_names_slowest_stage` 锁定"只有最外层阶段带 `stages` / `slowest` 汇总字段，且阶段数与该 `report_id` 的日志行数一致"，`test_sql_log_prints_every_metric_query` 锁定"模块内每条查询都打印 `sql` / `params`，快照查询不打印"，`test_page_keys_dedupe_facts_before_roster_mapping` 与 `test_page_total_and_keys_run_concurrently` 锁定分页键的去重顺序和并发取回。

@@ -305,6 +305,18 @@ def test_metric_queries_filter_roster_with_exists_instead_of_join(scope):
     assert "FROM jkh_user_inf jkh" in keys_sql
 
 
+def test_page_keys_dedupe_facts_before_roster_mapping(scope):
+    """分页键先在事实里对（人员，技能）去重，再做名单过滤与机构映射。"""
+    scoped = replace(scope, group_by="manager", skill_detail=True)
+    keys_sql = build_queries(scoped, keys_only=True)["keys"][0]
+
+    assert "SELECT DISTINCT p.user_id AS group_user" in keys_sql
+    # 事实分支不再逐行做名单校验，机构映射只跑在去重后的人员上。
+    assert "jkh_user_inf jkh WHERE jkh.user_id = p.user_id" not in keys_sql
+    assert "jkh_user_inf jkh WHERE jkh.user_id = sp.user_id" not in keys_sql
+    assert "jkh.user_id = pairs.group_user" in keys_sql
+
+
 class AsyncQueryDb:
     """执行真实查询，保留调用记录以验证固定查询数和早退。"""
 
@@ -418,6 +430,51 @@ def timing_lines(caplog):
         for record in caplog.records
         if "task_type_report_timing" in record.getMessage()
     ]
+
+
+def sql_lines(caplog):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if report_service.SQL_LOG_TAG in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sql_log_prints_every_metric_query(service_db, caplog):
+    """排查入口：每条查询打印 SQL 与绑定参数，一眼看到指标口径。"""
+    caplog.set_level(
+        logging.INFO, logger="monitor.app.services.cron.task_type_report"
+    )
+    await report_service.TaskTypeReportService().get_report(
+        request_params(group_by="org"), "S", "100"
+    )
+    lines = sql_lines(caplog)
+    # 名单快照在 QueryService 里执行，不属于本模块的日志范围。
+    own_calls = [
+        call
+        for call in service_db.calls
+        if "MIN(sync_date) AS earliest_date" not in call[0]
+    ]
+    assert len(own_calls) == 10
+    assert len(lines) == len(own_calls)
+    joined = "\n".join(lines)
+    for sql, _ in own_calls:
+        assert f"sql={sql} params=" in joined
+    for name in (
+        "roster_conflicts",
+        "push_tasks",
+        "ask_tasks",
+        "active",
+        "push_skills",
+        "ask_skills",
+        "push_customers",
+        "ask_customers",
+        "clicks",
+        "permissions",
+    ):
+        assert f"query={name} " in joined
+    assert all("status=ok" in line and "rows=" in line for line in lines)
 
 
 @pytest.mark.asyncio

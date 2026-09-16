@@ -7,8 +7,11 @@
   ``task_type_report_rows``；本模块只负责快照、范围、名称解析和查询编排。
 - 排查：INFO 级别输出 ``task_type_report_timing`` 日志。同一个 ``report_id``
   下逐条比较 ``stage`` 的 ``elapsed_ms``，``stage=get_report`` 那行额外给出
-  ``stages``、``slowest`` 和 ``slowest_ms``，可直接看到最慢阶段。日志不含 SQL、
-  绑定参数和人员信息。
+  ``stages``、``slowest`` 和 ``slowest_ms``，可直接看到最慢阶段；该日志不含
+  SQL、绑定参数和人员信息。
+- SQL 排查：本模块执行（且仅限本模块执行）的每条查询另外输出一行
+  ``task_type_report_sql``，带 ``query``、``sql`` 和 ``params``；``params``
+  包含查询条件本身，只用于核对结果口径，不要对外转发。
 """
 
 import asyncio
@@ -55,6 +58,7 @@ OPTION_COLUMNS = {
 logger = logging.getLogger(__name__)
 _report_id = ContextVar("task_type_report_id", default=None)
 _report_stages = ContextVar("task_type_report_stages", default=None)
+SQL_LOG_TAG = "task_type_report_sql"
 
 
 @contextmanager
@@ -110,11 +114,50 @@ def _record_stage(stage: str, elapsed_ms: float, *, outermost: bool) -> str:
 
 
 async def _fetch_report_query(db, name: str, query: tuple, *, one=False):
-    """执行一条报表查询，记录阶段耗时与返回行数。"""
+    """执行一条报表查询，记录阶段耗时、返回行数，并打印 SQL 与绑定参数。"""
+    sql, values = query
     with _report_stage(name) as details:
-        result = await (db.fetch_one(*query) if one else db.fetch_all(*query))
-        details["rows"] = int(result is not None) if one else len(result)
-        return result
+        started = perf_counter()
+        status, rows = "ok", None
+        try:
+            result = await (
+                db.fetch_one(sql, values) if one else db.fetch_all(sql, values)
+            )
+        except BaseException as exc:
+            status = type(exc).__name__
+            raise
+        else:
+            rows = int(result is not None) if one else len(result)
+            details["rows"] = rows
+            return result
+        finally:
+            _log_report_sql(
+                name,
+                sql,
+                values,
+                status=status,
+                rows=rows,
+                elapsed_ms=(perf_counter() - started) * 1000,
+            )
+
+
+def _log_report_sql(
+    name: str, sql: str, values, *, status: str, rows, elapsed_ms: float
+) -> None:
+    """按查询打印 SQL 与绑定参数；只覆盖本模块编排的查询。"""
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    logger.info(
+        "%s report_id=%s query=%s elapsed_ms=%.2f status=%s rows=%s sql=%s params=%s",
+        SQL_LOG_TAG,
+        _report_id.get(),
+        name,
+        elapsed_ms,
+        status,
+        rows,
+        sql,
+        tuple(values or ()),
+    )
 
 
 class ReportError(Exception):
@@ -184,10 +227,15 @@ async def validate_roster_scope(
         if not conditions:
             continue
         allowed = " AND ".join(conditions)
-        row = await db.fetch_one(
-            f"SELECT COUNT(*) AS total, SUM(CASE WHEN {allowed} THEN 1 ELSE 0 END) AS allowed "
-            f"FROM jkh_user_inf WHERE sync_date = %s AND {column} = %s",
-            tuple(allowed_params + [sync_date, value]),
+        row = await _fetch_report_query(
+            db,
+            "scope_check",
+            (
+                f"SELECT COUNT(*) AS total, SUM(CASE WHEN {allowed} THEN 1 ELSE 0 END) AS allowed "
+                f"FROM jkh_user_inf WHERE sync_date = %s AND {column} = %s",
+                tuple(allowed_params + [sync_date, value]),
+            ),
+            one=True,
         )
         if row and row["total"] and not row["allowed"]:
             raise ReportError(
@@ -220,7 +268,9 @@ async def resolve_organization_filters(
             f"SELECT DISTINCT {', '.join(id_columns)} FROM jkh_user_inf "
             f"WHERE {' AND '.join(conditions)} LIMIT 2"
         )
-        rows = await db.fetch_all(sql, tuple(values))
+        rows = await _fetch_report_query(
+            db, "resolve_filter", (sql, tuple(values))
+        )
         if not rows:
             return False, resolved
         if len(rows) > 1:
@@ -329,19 +379,20 @@ async def query_page(
     *,
     concurrency: int = REPORT_QUERY_CONCURRENCY,
 ):
-    """经理/技能分页：先取事实键与总数，再按本页键执行同一套聚合查询。"""
+    """经理/技能分页：并发取事实键总数与本页键，再按本页键执行聚合查询。"""
     queries = build_queries(scope)
     # 检查全快照冲突，空页也不能跳过该校验。
     await _assert_unique_roster(
         db, queries["roster_conflicts"], stage="page_roster_conflicts"
     )
     key_sql, values = build_queries(scope, keys_only=True)["keys"]
-    total = await _fetch_page_total(db, key_sql, values)
     offset = (params.page - 1) * params.page_size
-    if offset >= total:
-        return [], total
-    page_keys = await _fetch_page_keys(db, key_sql, values, params, offset)
-    if not page_keys:
+    # 总数与本页键互不依赖，共用一个键子查询，并发取回可省掉一次完整等待。
+    total, page_keys = await asyncio.gather(
+        _fetch_page_total(db, key_sql, values),
+        _fetch_page_keys(db, key_sql, values, params, offset),
+    )
+    if offset >= total or not page_keys:
         return [], total
     scoped_page = replace(
         scope,
@@ -477,13 +528,17 @@ async def _fetch_options(
     if params.first_bbk_id is not None:
         conditions.append("first_bbk_id = %s")
         values.append(params.first_bbk_id)
-    return await db.fetch_all(
-        f"SELECT {id_column} AS value, "
-        f"COALESCE(MIN(NULLIF({name_column}, '')), {id_column}) AS label "
-        f"FROM jkh_user_inf WHERE {' AND '.join(conditions)} "
-        f"AND {id_column} IS NOT NULL AND TRIM({id_column}) <> '' "
-        f"GROUP BY {id_column} ORDER BY {id_column}",
-        tuple(values),
+    return await _fetch_report_query(
+        db,
+        "options",
+        (
+            f"SELECT {id_column} AS value, "
+            f"COALESCE(MIN(NULLIF({name_column}, '')), {id_column}) AS label "
+            f"FROM jkh_user_inf WHERE {' AND '.join(conditions)} "
+            f"AND {id_column} IS NOT NULL AND TRIM({id_column}) <> '' "
+            f"GROUP BY {id_column} ORDER BY {id_column}",
+            tuple(values),
+        ),
     )
 
 

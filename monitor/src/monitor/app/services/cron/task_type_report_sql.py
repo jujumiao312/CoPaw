@@ -333,27 +333,31 @@ def build_queries(
         AND ({click_push} OR {click_ask})
         AND {jkh_exists("c.user_id")}"""
     if keys_only:
-        key_skill = (
+        # 分页键只由（人员，技能）决定：先在事实里对二者去重，再做名单过滤和
+        # 机构映射，避免把逐行的机构子查询跑在整个事实窗口上。
+        pair_skill = (
             ", kd.skill_id AS skill_id"
             if scope.skill_detail
             else ", NULL AS skill_id"
         )
-        push_key_dims = metric_dims("p.user_id") + key_skill
-        active_key_dims = metric_dims("p.job_user_id") + key_skill
-        ask_key_dims = metric_dims("sp.user_id") + key_skill
-        click_key_dims = metric_dims("c.user_id") + key_skill
-        keys_sql = f"""SELECT DISTINCT {push_key_dims}
-            FROM ({push}) p {push_skill_join}
-            WHERE {jkh_exists("p.user_id")}
-            UNION SELECT DISTINCT {active_key_dims}
-            FROM ({push}) p {push_skill_join}
-            WHERE p.job_status = 'active' AND p.deleted_at IS NULL
-            AND {jkh_exists("p.job_user_id")}
-            UNION SELECT DISTINCT {ask_key_dims}
-            FROM ({ask}) sp {ask_skill_join}
-            WHERE {jkh_exists("sp.user_id")}
-            UNION SELECT DISTINCT {click_key_dims}
-            FROM ({click_rows}) c {click_skill_join}"""
+        key_skill = (
+            ", pairs.skill_id AS skill_id"
+            if scope.skill_detail
+            else ", NULL AS skill_id"
+        )
+        keys_sql = f"""SELECT DISTINCT {metric_dims("pairs.group_user")}{key_skill}
+            FROM (
+                SELECT DISTINCT p.user_id AS group_user{pair_skill}
+                FROM ({push}) p {push_skill_join}
+                UNION SELECT DISTINCT p.job_user_id{pair_skill}
+                FROM ({push}) p {push_skill_join}
+                WHERE p.job_status = 'active' AND p.deleted_at IS NULL
+                UNION SELECT DISTINCT sp.user_id{pair_skill}
+                FROM ({ask}) sp {ask_skill_join}
+                UNION SELECT DISTINCT c.user_id{pair_skill}
+                FROM ({click_rows}) c {click_skill_join}
+            ) pairs
+            WHERE {jkh_exists("pairs.group_user")}"""
         return {"keys": bind(keys_sql, values)}
     query["clicks"] = f"""SELECT {metric_dims("c.user_id")}{skill_dims}, c.task_type,
         COUNT(DISTINCT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub'
