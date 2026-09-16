@@ -60,7 +60,7 @@ def test_six_combinations_execute_all_queries(
     results = execute(dimension_db, scoped)
     assert len(build_queries(scoped)) == 10
     rows = assemble(results, group_by, skill_detail)
-    assert len(rows) == (6 if skill_detail else 9)
+    assert len(rows) == (6 if skill_detail else 3)
     user = "alice" if group_by == "manager" else None
     row = find_row(rows, user=user, skill="k1" if skill_detail else None)
     assert row["suc_execute_job"] == 1

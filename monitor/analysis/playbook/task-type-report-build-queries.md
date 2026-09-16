@@ -1,5 +1,39 @@
 # 金葵花任务类型报表 build_queries 梳理
 
+## 期间事实与慢查询排查（2026-09-16）
+
+权限查询优化后的复测：对比同样请求的 `stage=permissions elapsed_ms` 和 `rows`，同时查看 `get_report` 总耗时。分支行权限结果现在只包含事实机构，但每个机构人数仍按完整名单计算。无事实时不会出现 permissions 阶段日志。执行顺序改为事实在前、权限在后，不能拿日志行顺序当作查询丢失。
+
+本地 3,000 名额外无活动经理的 SQLite 无显式索引样本中，旧权限查询约 337ms / 1,832 万 VM 指令，新查询约 5ms / 5.4 万 VM 指令；仅用于验证减少无关工作，不是 TDSQL 性能承诺。线上仍需比较相同请求的日志及执行计划。
+
+当前口径：名单限定事实范围并提供元数据、权限人数；结果维度来自各指标的期间事实并集。普通经理分页与技能分页都使用推送执行、owner 活跃、Span、点击四条事实路径的 UNION。每个有效维度仍补三类任务，不能用全零指标判断是否有事实。
+
+服务以 INFO 级别记录 `task_type_report_timing`，保持 `MONITOR_LOG_LEVEL=info` 即可。日志不含 SQL、绑定参数或人员信息。筛选同一个 `report_id` 后比较 `elapsed_ms`：
+
+- `get_report`：方法总耗时，包含响应模型构造，不含路由 JSON 序列化、XLSX 文件生成和网络传输；它包含其他阶段，不能与子阶段相加。
+- `resolve_snapshot` / `validate_scope` / `resolve_filters` / `validate_resolved_scope`：快照选择、范围校验和名称解析。
+- `roster_conflicts` / `permissions` / `push_tasks` / `ask_tasks` / `active` / `push_skills` / `ask_skills` / `push_customers` / `ask_customers` / `clicks`：对应同名 SQL，`rows` 为返回聚合行数。
+- `page_roster_conflicts` / `page_count` / `page_keys`：分页前校验、事实键计数与取页。
+- `assemble`：Python 合并、补齐与排序，`rows` 为输出行数。
+
+`status=ok` 表示正常结束；异常记录异常类型并原样抛出；路由超时取消会记录 `CancelledError`。并发请求用独立 `report_id`，多实例部署同时保留容器/实例日志标签。
+
+数据库调用的计时包含连接池等待、SQL 执行、传输和结果转换，不能直接等同于数据库执行时间。核心查询目前串行执行，总耗时会累积；不要未经测量直接并发全部查询，以免放大连接池和数据库压力。
+
+定位到慢查询名后，在相同 Scope 下取得实际参数化 SQL，通过现有连接执行普通 EXPLAIN：
+
+```python
+# db 为现有数据库连接，scope 为复现请求使用的 Scope。
+sql, values = build_queries(scope)["clicks"]
+plan = await db.fetch_all("EXPLAIN " + sql, values)
+```
+
+`page_count` / `page_keys` 使用 `build_queries(scope, keys_only=True)["keys"]`，并按 `query_page` 的实际 COUNT、ORDER BY、LIMIT/OFFSET 包装后查看执行计划。不要只解释内部键查询，也不要把参数展开到共享日志。
+
+优先核查计划是否在时间和来源过滤后仍扫描大量行，以及 `EXISTS`、按用户查机构的相关子查询、`FIND_IN_SET`、UNION/DISTINCT 的成本。经理分页会分别执行事实键计数和取页，可能成为新的主要耗时点。若数据库侧执行快但上述调用计时慢，再检查连接池等待及网络；若 `assemble` 慢，查看返回行数及 Python CPU profile。
+
+本地 SQLite 测试验证口径、分页、日志关联及取消路径，不代表真实 TDSQL 的执行计划或性能。生产瓶颈需要一次真实请求的分阶段日志和相应 EXPLAIN 才能确认。
+
 对象文件：`src/monitor/app/services/cron/task_type_report_sql.py`。
 
 消费方：`src/monitor/app/services/cron/task_type_report.py` 的 `query_core` 与 `assemble`。
@@ -10,9 +44,9 @@
 
 ## 1. 定位
 
-`build_queries(scope)` 是纯函数 SQL 工厂：把已校验的 `Scope` 一次编译成**固定 10 条**参数化聚合 SQL，返回 `dict[str, tuple[str, tuple]]`，每个值可被 `db.fetch_all(*query)` 直接展开。
+`build_queries(scope, keys_only=False, permission_keys=None)` 是纯函数 SQL 工厂：把已校验的 `Scope` 一次编译成**固定 10 条**参数化聚合 SQL，返回 `dict[str, tuple[str, tuple]]`，每个值可被 `db.fetch_all(*query)` 直接展开。
 
-- 查询条数与机构数、用户数无关，不存在按机构循环的 N+1。DESIGN.md 第 7 节记录单次完整请求最多 13 次数据库查询：10 条报表查询 + 1 次快照选择 + 至多 2 次机构名称解析。
+- 查询条数与机构数、用户数无关，不存在按机构循环的 N+1。有事实时核心仍为 10 条查询，无事实时为 9 条；另外有快照、范围校验、名称解析以及分页键查询；总数随输入路径变化，不能统一宣称最多 13 条。
 - 业务值全部通过内部 `:name` 占位符传递，不进入 SQL 文本，由 `bind` 编译为驱动可识别的 `%s`。
 - 函数体为线性字符串拼接，无嵌套分支，圈复杂度低；无需为新增机构层级调整结构。
 
@@ -27,7 +61,7 @@
 | `start` / `stop` | 必填；**不允许携带 tzinfo**，要求调用方已换算到数据库存储时区；且 `0 < stop - start <= 93 天` |
 | `group_by` | `overall` / `branch` / `org` / `manager` |
 | `skill_detail` | 默认 false；true 要求非 overall，详情见 DIMENSIONS.md |
-| `first_bbk_id` / `org_id` | 可选机构筛选，作用于名单骨架与指标侧名单 `EXISTS` 过滤 |
+| `first_bbk_id` / `org_id` | 可选机构筛选，作用于元数据查询与指标侧名单 `EXISTS` 过滤 |
 
 所以 `build_queries` 自身不做任何参数校验，它只接受已经合法的 `Scope`。
 
@@ -43,9 +77,9 @@
 
 ## 3. 内部结构：4 类原料 + 2 个基础集合
 
-1. **名单派生表 `roster`（第 51-55 行）**
-   `jkh_user_inf` 按 `sync_date` 取快照，`GROUP BY user_id, first_bbk_id, org_id`，机构名用 `MIN()` 取稳定显示值。`roster_filter` 按需追加 `first_bbk_id` / `org_id` 条件。
-   `permissions` 和非技能明细分页键仍以它作为名单/维度骨架；指标查询不再 `JOIN ({roster}) r`，而是使用 `EXISTS (SELECT 1 FROM jkh_user_inf jkh ...)` 过滤非名单客户经理，并用同一快照查出聚合维度。
+1. **名单与权限元数据**
+   `permissions` 直接从所选快照的 `jkh_user_inf r` 出发，`LEFT JOIN swe_tenant_init_source i`，在 JOIN 条件中限定 source，按目标机构/经理分组并 `COUNT(DISTINCT i.tenant_id)`。不再先按人员构造名单派生表，也不再逐人执行 `CASE WHEN EXISTS`。重复名单/初始化记录不会放大权限人数，零权限的事实维度仍保留元数据。
+   服务先查询事实并收集维度键，再通过 `build_queries(scope, permission_keys=...)` 参数化限制权限查询的名单范围：分行按分行，支行按分行+支行，经理按机构+经理；overall 保持原全范围口径。权限人数包含目标机构中无活动的有权限经理，不能按事实用户集合裁剪机构人数。普通和技能分页键仍来自期间事实并集。
 
 2. **分组维度（第 56-63 行）**
 
@@ -74,12 +108,12 @@
 
 ## 4. 10 条查询
 
-下表顺序即 `query` 字典的插入顺序，也是 `query_core` 的执行顺序。参数个数为 overall、无机构 ID 筛选、非技能明细时的基础值；分行/支行/经理分组会因快照维度查值增加 `sync_date` 绑定。2026-09-14：ask 已改为 Span 主表，以下旧行号仅供参考，定位以符号名为准。
+下表顺序为 `query` 字典的插入顺序。`query_core` 先校验冲突、再执行事实查询，最后按事实维度查询 `permissions`；无事实时跳过权限查询。参数个数为 overall、无机构 ID 筛选、非技能明细时的基础值；权限查询还会绑定实际维度键；分行/支行/经理分组会因快照维度查值增加 `sync_date` 绑定。2026-09-14：ask 已改为 Span 主表，以下旧行号仅供参考，定位以符号名为准。
 
 | # | 名称 | 参数个数 | 输出字段 | 角色与要点 |
 | --- | --- | --- | --- | --- |
 | 1 | `roster_conflicts` | 1 | `user_id` | 名单机构唯一性校验，`HAVING COUNT(*) > 1 LIMIT 1`；命中即 503 `jkh_roster_ambiguous`。第 91 行注释说明必须在机构筛选之前执行，否则冲突会被筛选掩盖 |
-| 2 | `permissions` | 2 | `group_bbk`、`group_org`、`first_bbk_name`、`org_name`、`permission_manager_count` | **唯一不带 `task_type` 的查询，是结果骨架**；`assemble` 用它补齐三类任务。空结果时 `query_core` 直接返回空列表 |
+| 2 | `permissions` | 2 | `group_bbk`、`group_org`、`first_bbk_name`、`org_name`、`permission_manager_count` | **唯一不带 `task_type` 的查询，提供元数据与权限人数**；`assemble` 只对事实中出现的维度补齐三类任务。无事实时 `query_core` 跳过此查询并返回空列表 |
 | 3 | `push_tasks` | 4 | 维度 + `task_type`、`suc_execute_job`、`read_tasks` | 执行侧按 `p.user_id` 用名单 `EXISTS` 过滤 |
 | 4 | `ask_tasks` | 4 | 维度 + `ask_plan`、`suc_execute_job`、`read_tasks` | 成功数和已读数均为 `COUNT(DISTINCT sp.trace_id)`，不依赖 Trace 表、has_error 或阅读埋点 |
 | 5 | `active` | 4 | 维度 + `task_type`、`active_manager_count` | `COUNT(DISTINCT p.job_user_id)`，条件 `job_status='active' AND deleted_at IS NULL`；**按任务归属人而非执行人匹配名单** |
@@ -93,7 +127,7 @@
 
 改动任何一条查询时，以下契约不能破坏：
 
-1. **键对齐**：除 `permissions` 外，每条查询都按 `(group_bbk, group_org, task_type)` 产出，且键必须是 `permissions` 骨架键的子集。否则 `assemble`（第 111-117 行）抛 `ValueError("roster changed during report query")`。这是名单并发变更的显式检测点，不是冗余判断。
+1. **键对齐**：除 `permissions` 外，每条查询都按 `(group_bbk, group_org, task_type)` 产出，且键必须是 `permissions` 元数据键的子集；最终结果只包含事实维度并集。否则 `assemble`（第 111-117 行）抛 `ValueError("roster changed during report query")`。这是名单并发变更的显式检测点，不是冗余判断。
 2. **时间窗**：统一半开区间 `[start, stop)`（`date_bounds` 对 `end_date` 加一天），但三条链路各用自己的时间列——推送用 `actual_time`、主动提问用 `start_time`、点击用 `clicked_at`。第 152 行注释说明点击链路不对关联任务再附加生成时间限制。
 3. **不跨组累加 DISTINCT**：SQL 只做机构级聚合，比例在 service 层用 `Decimal` 计算；`assemble` 不做分组行求和，所以 `overall` 行是独立重算而非 branch 行相加。
 4. **空值语义两侧对齐**：`push_other` 天然没有客户数据（`push_customers` 限定 `push_plan`），`_finish_row` 也据此把 4 个客户字段置 `None`；`ask_plan` 无 `active_manager_count`。SQL 与组装逻辑必须同步修改。

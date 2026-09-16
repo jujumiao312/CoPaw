@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """独立的金葵花任务类型报表服务，保持现有报表方法不变。"""
 
+import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from time import perf_counter
+from uuid import uuid4
 
 from ...database import get_db_connection
 from ...models.task_type_report import (
@@ -45,6 +50,40 @@ RATIOS = {
     "click_to_phone_rate": ("phone_customer_count", "recommended_customers"),
 }
 DATABASE_UNAVAILABLE = "报表数据库暂不可用。"
+logger = logging.getLogger(__name__)
+_report_id = ContextVar("task_type_report_id", default=None)
+
+
+@contextmanager
+def _report_stage(stage: str):
+    """记录请求关联耗时；不记录 SQL 参数、人员信息和异常正文。"""
+    token = _report_id.set(uuid4().hex) if _report_id.get() is None else None
+    started = perf_counter()
+    status = "ok"
+    details = {"rows": None}
+    try:
+        yield details
+    except BaseException as exc:
+        status = type(exc).__name__
+        raise
+    finally:
+        logger.info(
+            "task_type_report_timing report_id=%s stage=%s elapsed_ms=%.2f status=%s rows=%s",
+            _report_id.get(),
+            stage,
+            (perf_counter() - started) * 1000,
+            status,
+            details["rows"],
+        )
+        if token is not None:
+            _report_id.reset(token)
+
+
+async def _fetch_report_query(db, name: str, query: tuple, *, one=False):
+    with _report_stage(name) as details:
+        result = await (db.fetch_one(*query) if one else db.fetch_all(*query))
+        details["rows"] = int(result is not None) if one else len(result)
+        return result
 
 
 def date_bounds(start_date: date, end_date: date) -> tuple[datetime, datetime]:
@@ -65,7 +104,7 @@ def percentage(numerator: int | None, denominator: int | None) -> float | None:
 
 
 def _empty_rows(dimensions: list[dict], group_by: str) -> dict:
-    """以名单机构为骨架补齐三类任务。"""
+    """为传入的有效维度补齐三类任务。"""
     rows = {}
     for dimension in dimensions:
         for task_type in TASK_TYPES:
@@ -127,7 +166,28 @@ def assemble(
     results: dict[str, list[dict]], group_by: str, skill_detail: bool = False
 ) -> list[dict]:
     """只合并数据库聚合结果；绝不累加分组后的 DISTINCT 计数生成总行。"""
-    base_rows = _empty_rows(results["permissions"], group_by)
+    # 是否有事实由查询返回的分组决定，不能用指标是否为零判断。
+    fact_dimensions = {
+        (
+            record["group_bbk"],
+            record["group_org"],
+            record.get("group_user", ""),
+        )
+        for name, records in results.items()
+        if name not in ("permissions", "roster_conflicts")
+        for record in records
+    }
+    dimensions = [
+        record
+        for record in results["permissions"]
+        if (
+            record["group_bbk"],
+            record["group_org"],
+            record.get("group_user", ""),
+        )
+        in fact_dimensions
+    ]
+    base_rows = _empty_rows(dimensions, group_by)
     rows = {} if skill_detail else base_rows
     for name, records in results.items():
         if name in ("permissions", "roster_conflicts"):
@@ -182,7 +242,9 @@ def _expand_skill_rows(
 async def query_core(db, scope: Scope) -> list[dict]:
     """db 使用现有 DatabaseConnection；空快照应在调用此函数之前处理。"""
     queries = build_queries(scope)
-    conflicts = await db.fetch_all(*queries["roster_conflicts"])
+    conflicts = await _fetch_report_query(
+        db, "roster_conflicts", queries["roster_conflicts"]
+    )
     if conflicts:
         raise ReportError(
             503,
@@ -191,11 +253,25 @@ async def query_core(db, scope: Scope) -> list[dict]:
         )
     results = {}
     for name, (sql, params) in queries.items():
-        if name != "roster_conflicts":
-            results[name] = await db.fetch_all(sql, params)
-            if name == "permissions" and not results[name]:
-                return []
-    return assemble(results, scope.group_by, scope.skill_detail)
+        if name not in ("roster_conflicts", "permissions"):
+            results[name] = await _fetch_report_query(db, name, (sql, params))
+    dimension_keys = {
+        (row["group_bbk"], row["group_org"], row.get("group_user", ""))
+        for records in results.values()
+        for row in records
+    }
+    if not dimension_keys:
+        return []
+    permission_query = build_queries(
+        scope, permission_keys=tuple(dimension_keys)
+    )["permissions"]
+    results["permissions"] = await _fetch_report_query(
+        db, "permissions", permission_query
+    )
+    with _report_stage("assemble") as details:
+        rows = assemble(results, scope.group_by, scope.skill_detail)
+        details["rows"] = len(rows)
+        return rows
 
 
 class ReportError(Exception):
@@ -315,7 +391,9 @@ async def validate_roster_scope(
 
 async def query_page(db, scope: Scope, params: TaskTypeReportParams):
     # 检查全快照冲突，空页也不能跳过该校验。
-    conflicts = await db.fetch_all(*build_queries(scope)["roster_conflicts"])
+    conflicts = await _fetch_report_query(
+        db, "page_roster_conflicts", build_queries(scope)["roster_conflicts"]
+    )
     if conflicts:
         raise ReportError(
             503,
@@ -323,19 +401,26 @@ async def query_page(db, scope: Scope, params: TaskTypeReportParams):
             "名单快照中存在同一用户的多个机构归属。",
         )
     key_sql, values = build_queries(scope, keys_only=True)["keys"]
-    count = await db.fetch_one(
-        f"SELECT COUNT(*) AS total FROM ({key_sql}) dimension_keys", values
+    count = await _fetch_report_query(
+        db,
+        "page_count",
+        (f"SELECT COUNT(*) AS total FROM ({key_sql}) dimension_keys", values),
+        one=True,
     )
     total = int(count["total"] or 0)
     offset = (params.page - 1) * params.page_size
     if offset >= total:
         return [], total
-    page_keys = await db.fetch_all(
-        f"SELECT * FROM ({key_sql}) dimension_keys ORDER BY "
-        "group_bbk IS NOT NULL, COALESCE(group_bbk, ''), "
-        "group_org IS NOT NULL, COALESCE(group_org, ''), group_user, skill_id "
-        "LIMIT %s OFFSET %s",
-        values + (params.page_size, offset),
+    page_keys = await _fetch_report_query(
+        db,
+        "page_keys",
+        (
+            f"SELECT * FROM ({key_sql}) dimension_keys ORDER BY "
+            "group_bbk IS NOT NULL, COALESCE(group_bbk, ''), "
+            "group_org IS NOT NULL, COALESCE(group_org, ''), group_user, skill_id "
+            "LIMIT %s OFFSET %s",
+            values + (params.page_size, offset),
+        ),
     )
     if not page_keys:
         return [], total
@@ -354,78 +439,89 @@ class TaskTypeReportService:
     async def get_report(
         self, params: TaskTypeReportParams, source_id: str, bbk_id: str
     ) -> TaskTypeReportResponse:
-        params = enforce_branch(params, bbk_id)
-        db = report_db()
-        sync_date = await QueryService._resolve_jkh_sync_date(
-            db, datetime.combine(params.end_date, time.max)
-        )
-        filters = {
-            "first_bbk_id": params.first_bbk_id,
-            "org_id": params.org_id,
-        }
-        warnings = ["period_ratios_not_cohort_conversion"]
-        items, total = [], None
-        if sync_date is None:
-            warnings.append("empty_roster")
-        else:
-            await validate_roster_scope(db, sync_date, params)
-            matched, filters = await resolve_organization_filters(
-                db, sync_date, params
-            )
-            if matched:
-                if (
-                    filters["first_bbk_id"] != params.first_bbk_id
-                    or filters["org_id"] != params.org_id
-                ):
-                    await validate_roster_scope(
-                        db, sync_date, params.model_copy(update=filters)
+        with _report_stage("get_report"):
+            params = enforce_branch(params, bbk_id)
+            db = report_db()
+            with _report_stage("resolve_snapshot"):
+                sync_date = await QueryService._resolve_jkh_sync_date(
+                    db, datetime.combine(params.end_date, time.max)
+                )
+            filters = {
+                "first_bbk_id": params.first_bbk_id,
+                "org_id": params.org_id,
+            }
+            warnings = ["period_ratios_not_cohort_conversion"]
+            items, total = [], None
+            if sync_date is None:
+                warnings.append("empty_roster")
+            else:
+                with _report_stage("validate_scope"):
+                    await validate_roster_scope(db, sync_date, params)
+                with _report_stage("resolve_filters"):
+                    matched, filters = await resolve_organization_filters(
+                        db, sync_date, params
                     )
-                start, stop = date_bounds(params.start_date, params.end_date)
-                scope = Scope(
-                    source_id=source_id,
-                    sync_date=sync_date,
-                    start=start,
-                    stop=stop,
-                    group_by=params.group_by,
-                    skill_detail=params.skill_detail,
-                    user_id=params.user_id,
-                    keyword=params.keyword,
-                    **filters,
-                )
-                if params.page is not None:
-                    items, total = await query_page(db, scope, params)
-                else:
-                    items = await query_core(db, scope)
-            if not items and not total:
-                warnings.append(
-                    "no_matching_skills"
-                    if matched and params.skill_detail
-                    else "no_matching_organization"
-                )
-        if params.task_type is not None:
-            items = [
-                item for item in items if item["task_type"] == params.task_type
-            ]
-        if total is None:
-            total = len(items)
-        if params.skill_detail:
-            warnings.append("skill_rows_not_additive")
-        return TaskTypeReportResponse(
-            start_date=params.start_date,
-            end_date=params.end_date,
-            source_id=source_id,
-            sync_date=sync_date,
-            group_by=params.group_by,
-            skill_detail=params.skill_detail,
-            resolved_filters=filters,
-            warnings=warnings,
-            items=items,
-            page=params.page,
-            page_size=params.page_size,
-            total=total,
-            has_more=params.page is not None
-            and params.page * params.page_size < total,
-        )
+                if matched:
+                    if (
+                        filters["first_bbk_id"] != params.first_bbk_id
+                        or filters["org_id"] != params.org_id
+                    ):
+                        with _report_stage("validate_resolved_scope"):
+                            await validate_roster_scope(
+                                db,
+                                sync_date,
+                                params.model_copy(update=filters),
+                            )
+                    start, stop = date_bounds(
+                        params.start_date, params.end_date
+                    )
+                    scope = Scope(
+                        source_id=source_id,
+                        sync_date=sync_date,
+                        start=start,
+                        stop=stop,
+                        group_by=params.group_by,
+                        skill_detail=params.skill_detail,
+                        user_id=params.user_id,
+                        keyword=params.keyword,
+                        **filters,
+                    )
+                    if params.page is not None:
+                        items, total = await query_page(db, scope, params)
+                    else:
+                        items = await query_core(db, scope)
+                if not items and not total:
+                    warnings.append(
+                        "no_matching_skills"
+                        if matched and params.skill_detail
+                        else "no_matching_organization"
+                    )
+            if params.task_type is not None:
+                items = [
+                    item
+                    for item in items
+                    if item["task_type"] == params.task_type
+                ]
+            if total is None:
+                total = len(items)
+            if params.skill_detail:
+                warnings.append("skill_rows_not_additive")
+            return TaskTypeReportResponse(
+                start_date=params.start_date,
+                end_date=params.end_date,
+                source_id=source_id,
+                sync_date=sync_date,
+                group_by=params.group_by,
+                skill_detail=params.skill_detail,
+                resolved_filters=filters,
+                warnings=warnings,
+                items=items,
+                page=params.page,
+                page_size=params.page_size,
+                total=total,
+                has_more=params.page is not None
+                and params.page * params.page_size < total,
+            )
 
     async def get_options(
         self, params: ReportOptionsParams, source_id: str, bbk_id: str

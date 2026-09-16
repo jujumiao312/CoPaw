@@ -92,27 +92,47 @@ def _roster_scope_sql(scope: Scope) -> tuple[str, str, str, dict]:
     return roster_filter, jkh_filter, page_skill_filter, values
 
 
+def _permission_dimensions(scope: Scope, keys, values: dict) -> str:
+    """按实际结果维度收窄名单，保留机构内全部有权限人员。"""
+    if keys is None:
+        return ""
+    if not keys:
+        return " AND 1=0"
+    columns = {
+        "overall": (),
+        "branch": ("first_bbk_id",),
+        "org": ("first_bbk_id", "org_id"),
+        "manager": ("first_bbk_id", "org_id", "user_id"),
+    }[scope.group_by]
+    if not columns:
+        return ""
+    groups = []
+    for index, key in enumerate(keys):
+        conditions = []
+        for column, value in zip(columns, key):
+            if value is None:
+                conditions.append(f"r.{column} IS NULL")
+            else:
+                name = f"permission_{column}_{index}"
+                values[name] = value
+                conditions.append(f"r.{column} = :{name}")
+        groups.append("(" + " AND ".join(conditions) + ")")
+    return " AND (" + " OR ".join(groups) + ")"
+
+
 def build_queries(
-    scope: Scope, keys_only: bool = False
+    scope: Scope, keys_only: bool = False, permission_keys: tuple | None = None
 ) -> dict[str, tuple[str, tuple]]:
     """一次构造所有分组查询；查询数与机构数无关。"""
     roster_filter, jkh_filter, page_skill_filter, values = _roster_scope_sql(
         scope
     )
-    roster_manager = ""
     manager_info = ""
     if scope.group_by == "manager":
-        roster_manager = (
-            ", MIN(user_name) AS user_name, MIN(pst_lvl) AS pst_lvl"
-        )
         manager_info = (
             ", MIN(r.user_name) AS user_name, MIN(r.pst_lvl) AS pst_lvl"
         )
-    roster = f"""SELECT user_id, first_bbk_id, org_id,
-        MIN(first_bbk_nm) AS first_bbk_nm, MIN(org_nm) AS org_nm {roster_manager}
-        FROM jkh_user_inf WHERE sync_date = :sync_date
-        AND user_id IS NOT NULL AND user_id <> '' {roster_filter}
-        GROUP BY user_id, first_bbk_id, org_id"""
+    permission_filter = _permission_dimensions(scope, permission_keys, values)
     dimensions = {
         "overall": ("''", "''"),
         "branch": ("r.first_bbk_id", "''"),
@@ -217,10 +237,13 @@ def build_queries(
         "permissions"
     ] = f"""SELECT {dims}, MIN(r.first_bbk_nm) AS first_bbk_name,
         MIN(r.org_nm) AS org_name {manager_info},
-        COUNT(DISTINCT CASE WHEN EXISTS (SELECT 1 FROM swe_tenant_init_source i
-            WHERE i.tenant_id = r.user_id AND i.source_id = :source_id)
-            THEN r.user_id END) AS permission_manager_count
-        FROM ({roster}) r GROUP BY {groups}"""
+        COUNT(DISTINCT i.tenant_id) AS permission_manager_count
+        FROM jkh_user_inf r
+        LEFT JOIN swe_tenant_init_source i
+            ON i.tenant_id = r.user_id AND i.source_id = :source_id
+        WHERE r.sync_date = :sync_date AND r.user_id IS NOT NULL AND r.user_id <> ''
+            {roster_filter} {permission_filter}
+        GROUP BY {groups}"""
     query["push_tasks"] = f"""SELECT {metric_dims("p.user_id")}{skill_dims}, p.task_type,
         SUM(CASE WHEN p.status = 'success' AND p.async_status = 'success' THEN 1 ELSE 0 END) AS suc_execute_job,
         SUM(CASE WHEN p.is_read = 1 THEN 1 ELSE 0 END) AS read_tasks
@@ -307,33 +330,27 @@ def build_queries(
         AND ({click_push} OR {click_ask})
         AND {jkh_exists("c.user_id")}"""
     if keys_only:
-        if not scope.skill_detail:
-            keys_sql = f"SELECT {dims}, NULL AS skill_id FROM ({roster}) r GROUP BY {groups}"
-        else:
-            push_key_dims = (
-                metric_dims("p.user_id") + ", kd.skill_id AS skill_id"
-            )
-            active_key_dims = (
-                metric_dims("p.job_user_id") + ", kd.skill_id AS skill_id"
-            )
-            ask_key_dims = (
-                metric_dims("sp.user_id") + ", kd.skill_id AS skill_id"
-            )
-            click_key_dims = (
-                metric_dims("c.user_id") + ", kd.skill_id AS skill_id"
-            )
-            keys_sql = f"""SELECT DISTINCT {push_key_dims}
-                FROM ({push}) p {push_skill_join}
-                WHERE {jkh_exists("p.user_id")}
-                UNION SELECT DISTINCT {active_key_dims}
-                FROM ({push}) p {push_skill_join}
-                WHERE p.job_status = 'active' AND p.deleted_at IS NULL
-                AND {jkh_exists("p.job_user_id")}
-                UNION SELECT DISTINCT {ask_key_dims}
-                FROM ({ask}) sp {ask_skill_join}
-                WHERE {jkh_exists("sp.user_id")}
-                UNION SELECT DISTINCT {click_key_dims}
-                FROM ({click_rows}) c {click_skill_join}"""
+        key_skill = (
+            ", kd.skill_id AS skill_id"
+            if scope.skill_detail
+            else ", NULL AS skill_id"
+        )
+        push_key_dims = metric_dims("p.user_id") + key_skill
+        active_key_dims = metric_dims("p.job_user_id") + key_skill
+        ask_key_dims = metric_dims("sp.user_id") + key_skill
+        click_key_dims = metric_dims("c.user_id") + key_skill
+        keys_sql = f"""SELECT DISTINCT {push_key_dims}
+            FROM ({push}) p {push_skill_join}
+            WHERE {jkh_exists("p.user_id")}
+            UNION SELECT DISTINCT {active_key_dims}
+            FROM ({push}) p {push_skill_join}
+            WHERE p.job_status = 'active' AND p.deleted_at IS NULL
+            AND {jkh_exists("p.job_user_id")}
+            UNION SELECT DISTINCT {ask_key_dims}
+            FROM ({ask}) sp {ask_skill_join}
+            WHERE {jkh_exists("sp.user_id")}
+            UNION SELECT DISTINCT {click_key_dims}
+            FROM ({click_rows}) c {click_skill_join}"""
         return {"keys": bind(keys_sql, values)}
     query["clicks"] = f"""SELECT {metric_dims("c.user_id")}{skill_dims}, c.task_type,
         COUNT(DISTINCT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub'

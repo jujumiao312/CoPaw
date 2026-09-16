@@ -89,7 +89,7 @@ async def test_effective_branch_and_cross_scope_user_org(
     dimension_db, service_db
 ):
     all_rows = await fetch({**DATES, "group_by": "manager"})
-    assert all_rows.status_code == 200 and all_rows.json()["total"] == 9
+    assert all_rows.status_code == 200 and all_rows.json()["total"] == 3
     own = await fetch(
         {**DATES, "group_by": "manager", "task_type": "push_plan"}, "001"
     )

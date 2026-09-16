@@ -170,18 +170,11 @@ def test_all_metrics_and_deduplication(db, scope):
 def test_grouping_and_empty_dimensions(db, scope, group_by):
     scoped = replace(scope, group_by=group_by)
     rows = assemble(execute(db, scoped), group_by)
-    assert len(rows) == (3 if group_by == "overall" else 9)
+    assert len(rows) == 3
     if group_by == "org":
         assert {(row["first_bbk_id"], row["org_id"]) for row in rows} == {
             ("001", "01"),
-            ("002", "01"),
-            ("003", "03"),
         }
-        assert all(
-            row["skill_count"] == 0
-            for row in rows
-            if row["first_bbk_id"] == "003"
-        )
 
 
 def test_filter_values_bound_and_empty_filter_result(db, scope):
@@ -356,7 +349,7 @@ async def test_service_full_pipeline_and_fixed_query_count(service_db):
         request_params(group_by="org"), "S", "100"
     )
     assert result.sync_date == "2026-09-13"
-    assert len(result.items) == 9
+    assert len(result.items) == 3
     assert len(service_db.calls) == 11
     assert result.items[0].read_rate == 200.0
     assert result.items[1].active_manager_count is None
@@ -370,7 +363,7 @@ async def test_service_full_pipeline_and_fixed_query_count(service_db):
     result = await service.get_report(
         request_params(group_by="org"), "S", "100"
     )
-    assert len(result.items) == 309 and len(service_db.calls) == 11
+    assert len(result.items) == 3 and len(service_db.calls) == 11
 
 
 @pytest.mark.asyncio
@@ -457,8 +450,7 @@ async def test_service_concurrent_scopes_are_isolated(service_db):
     )
     assert first.source_id == "S" and first.items[0].suc_execute_job == 1
     assert first.items[0].permission_manager_count == 1
-    assert second.source_id == "OTHER" and second.items[0].suc_execute_job == 0
-    assert second.items[0].permission_manager_count == 1
+    assert second.source_id == "OTHER" and second.items == []
     assert second.end_date == date(2026, 9, 14)
 
 
