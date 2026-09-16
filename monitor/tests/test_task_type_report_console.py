@@ -190,7 +190,8 @@ async def test_pages_match_full_filtered_report(paged_db, service_db, detail):
     assert any("user_id IN" in sql for sql in metric_sql)
     if detail:
         assert any(
-            "r.user_id = %s AND kd.skill_id = %s" in sql for sql in metric_sql
+            "p.user_id = %s AND kd.skill_id = %s" in sql
+            for sql in metric_sql
         )
 
 

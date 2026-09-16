@@ -27,7 +27,7 @@
 | `start` / `stop` | 必填；**不允许携带 tzinfo**，要求调用方已换算到数据库存储时区；且 `0 < stop - start <= 93 天` |
 | `group_by` | `overall` / `branch` / `org` / `manager` |
 | `skill_detail` | 默认 false；true 要求非 overall，详情见 DIMENSIONS.md |
-| `first_bbk_id` / `org_id` | 可选机构筛选，仅作用于名单派生表 |
+| `first_bbk_id` / `org_id` | 可选机构筛选，作用于名单骨架与指标侧名单 `EXISTS` 过滤 |
 
 所以 `build_queries` 自身不做任何参数校验，它只接受已经合法的 `Scope`。
 
@@ -45,7 +45,7 @@
 
 1. **名单派生表 `roster`（第 51-55 行）**
    `jkh_user_inf` 按 `sync_date` 取快照，`GROUP BY user_id, first_bbk_id, org_id`，机构名用 `MIN()` 取稳定显示值。`roster_filter` 按需追加 `first_bbk_id` / `org_id` 条件。
-   这是**全局机构筛选的唯一入口**：所有指标查询都 `JOIN ({roster}) r`，所以筛选能一致下推到每张表，不会漏筛某一路指标。
+   `permissions` 和非技能明细分页键仍以它作为名单/维度骨架；指标查询不再 `JOIN ({roster}) r`，而是使用 `EXISTS (SELECT 1 FROM jkh_user_inf jkh ...)` 过滤非名单客户经理，并用同一快照查出聚合维度。
 
 2. **分组维度（第 56-63 行）**
 
@@ -74,13 +74,13 @@
 
 ## 4. 10 条查询
 
-下表顺序即 `query` 字典的插入顺序，也是 `query_core` 的执行顺序。参数个数为无机构 ID 筛选时的值。2026-09-14：ask 已改为 Span 主表，以下旧行号仅供参考，定位以符号名为准。
+下表顺序即 `query` 字典的插入顺序，也是 `query_core` 的执行顺序。参数个数为 overall、无机构 ID 筛选、非技能明细时的基础值；分行/支行/经理分组会因快照维度查值增加 `sync_date` 绑定。2026-09-14：ask 已改为 Span 主表，以下旧行号仅供参考，定位以符号名为准。
 
 | # | 名称 | 参数个数 | 输出字段 | 角色与要点 |
 | --- | --- | --- | --- | --- |
 | 1 | `roster_conflicts` | 1 | `user_id` | 名单机构唯一性校验，`HAVING COUNT(*) > 1 LIMIT 1`；命中即 503 `jkh_roster_ambiguous`。第 91 行注释说明必须在机构筛选之前执行，否则冲突会被筛选掩盖 |
 | 2 | `permissions` | 2 | `group_bbk`、`group_org`、`first_bbk_name`、`org_name`、`permission_manager_count` | **唯一不带 `task_type` 的查询，是结果骨架**；`assemble` 用它补齐三类任务。空结果时 `query_core` 直接返回空列表 |
-| 3 | `push_tasks` | 4 | 维度 + `task_type`、`suc_execute_job`、`read_tasks` | 执行侧按 `r.user_id = p.user_id` 匹配名单 |
+| 3 | `push_tasks` | 4 | 维度 + `task_type`、`suc_execute_job`、`read_tasks` | 执行侧按 `p.user_id` 用名单 `EXISTS` 过滤 |
 | 4 | `ask_tasks` | 4 | 维度 + `ask_plan`、`suc_execute_job`、`read_tasks` | 成功数和已读数均为 `COUNT(DISTINCT sp.trace_id)`，不依赖 Trace 表、has_error 或阅读埋点 |
 | 5 | `active` | 4 | 维度 + `task_type`、`active_manager_count` | `COUNT(DISTINCT p.job_user_id)`，条件 `job_status='active' AND deleted_at IS NULL`；**按任务归属人而非执行人匹配名单** |
 | 6 | `push_skills` | 4 | 维度 + `task_type`、`skill_count` | `DISTINCT k.skill_id`，要求 `include_in_statistics=1`，且排除已删除 job |

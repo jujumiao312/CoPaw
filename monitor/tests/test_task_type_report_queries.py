@@ -293,6 +293,23 @@ def test_validation_and_binding(scope):
         replace(scope, source_id="")
 
 
+def test_metric_queries_filter_roster_with_exists_instead_of_join(scope):
+    scoped = replace(scope, group_by="manager", skill_detail=True)
+    queries = build_queries(scoped)
+    metric_names = set(queries) - {"roster_conflicts", "permissions"}
+    metric_sql = [queries[name][0] for name in metric_names]
+
+    assert all(
+        "JOIN (SELECT user_id, first_bbk_id, org_id" not in sql
+        for sql in metric_sql
+    )
+    assert all("FROM jkh_user_inf jkh" in sql for sql in metric_sql)
+
+    keys_sql = build_queries(scoped, keys_only=True)["keys"][0]
+    assert "JOIN (SELECT user_id, first_bbk_id, org_id" not in keys_sql
+    assert "FROM jkh_user_inf jkh" in keys_sql
+
+
 class AsyncQueryDb:
     """执行真实查询，保留调用记录以验证固定查询数和早退。"""
 
