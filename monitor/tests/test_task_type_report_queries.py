@@ -3,6 +3,8 @@
 
 import sqlite3
 import asyncio
+import logging
+import re
 from dataclasses import replace
 from datetime import date, datetime
 
@@ -364,6 +366,79 @@ async def test_service_full_pipeline_and_fixed_query_count(service_db):
         request_params(group_by="org"), "S", "100"
     )
     assert len(result.items) == 3 and len(service_db.calls) == 11
+
+
+class ConcurrentQueryDb(AsyncQueryDb):
+    """记录同时在飞的查询数，用于验证事实查询的受限并发。"""
+
+    def __init__(self, connection):
+        super().__init__(connection)
+        self.in_flight = 0
+        self.peak = 0
+
+    async def fetch_all(self, sql, params=()):
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0.01)
+            return await super().fetch_all(sql, params)
+        finally:
+            self.in_flight -= 1
+
+
+async def report_with(monkeypatch, db, *, concurrency):
+    monkeypatch.setattr(report_service, "get_db_connection", lambda: db)
+    return await report_service.TaskTypeReportService(
+        concurrency=concurrency
+    ).get_report(request_params(group_by="org"), "S", "100")
+
+
+@pytest.mark.asyncio
+async def test_fact_queries_run_concurrently_with_stable_results(
+    db, monkeypatch
+):
+    """并发只压缩总耗时；查询条数、结果与串行一致，且在飞查询数受限。"""
+    serial_db = ConcurrentQueryDb(db)
+    serial = await report_with(monkeypatch, serial_db, concurrency=1)
+    parallel_db = ConcurrentQueryDb(db)
+    parallel = await report_with(
+        monkeypatch,
+        parallel_db,
+        concurrency=report_service.REPORT_QUERY_CONCURRENCY,
+    )
+    assert serial.items == parallel.items
+    assert len(serial_db.calls) == len(parallel_db.calls) == 11
+    assert serial_db.peak == 1
+    assert 1 < parallel_db.peak <= report_service.REPORT_QUERY_CONCURRENCY
+
+
+def timing_lines(caplog):
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if "task_type_report_timing" in record.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_timing_log_names_slowest_stage(service_db, caplog):
+    """排查入口：最外层阶段额外给出阶段数和最慢子阶段。"""
+    caplog.set_level(
+        logging.INFO, logger="monitor.app.services.cron.task_type_report"
+    )
+    await report_service.TaskTypeReportService().get_report(
+        request_params(), "S", "100"
+    )
+    lines = timing_lines(caplog)
+    total = [line for line in lines if "stage=get_report " in line]
+    assert len(total) == 1
+    assert "status=ok" in total[0] and "rows=3" in total[0]
+    # 汇总字段只挂在最外层阶段，避免每条日志重复拼接。
+    assert [line for line in lines if " slowest=" in line] == total
+    summary = re.search(r"stages=(\d+) slowest=(\S+)", total[0])
+    assert summary
+    assert int(summary.group(1)) == len(lines)
+    assert f"stage={summary.group(2)} " in "\n".join(lines)
 
 
 @pytest.mark.asyncio

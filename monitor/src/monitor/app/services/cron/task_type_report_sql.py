@@ -5,6 +5,9 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
+# 不参与指标合并的辅助查询：名单冲突校验与权限元数据。
+META_QUERY_NAMES = ("roster_conflicts", "permissions")
+
 
 @dataclass(frozen=True)
 class Scope:

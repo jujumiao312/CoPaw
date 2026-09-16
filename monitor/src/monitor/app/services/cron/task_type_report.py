@@ -1,63 +1,68 @@
 # -*- coding: utf-8 -*-
-"""独立的金葵花任务类型报表服务，保持现有报表方法不变。"""
+"""金葵花任务类型报表服务。
 
+- 入口：``TaskTypeReportService.get_report`` 完成一次统计查询，统计与导出共用；
+  ``get_options`` 提供分行/支行下拉选项。
+- 分工：SQL 构造在 ``task_type_report_sql``，行组装与派生比例在
+  ``task_type_report_rows``；本模块只负责快照、范围、名称解析和查询编排。
+- 排查：INFO 级别输出 ``task_type_report_timing`` 日志。同一个 ``report_id``
+  下逐条比较 ``stage`` 的 ``elapsed_ms``，``stage=get_report`` 那行额外给出
+  ``stages``、``slowest`` 和 ``slowest_ms``，可直接看到最慢阶段。日志不含 SQL、
+  绑定参数和人员信息。
+"""
+
+import asyncio
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, ROUND_HALF_UP
 from time import perf_counter
 from uuid import uuid4
 
 from ...database import get_db_connection
 from ...models.task_type_report import (
-    TaskTypeReportParams,
-    TaskTypeReportResponse,
     ReportOptionsParams,
     ReportOptionsResponse,
+    TaskTypeReportParams,
+    TaskTypeReportResponse,
 )
 from .query_service import QueryService
-from .task_type_report_sql import Scope, build_queries
 
-TASK_TYPES = ("push_plan", "ask_plan", "push_other")
-LABELS = dict(
-    zip(
-        TASK_TYPES,
-        ("推送(名单+方案)", "主动提问(名单+方案)", "推送(非名单方案)"),
-    )
-)
-COUNTS = (
-    "skill_count",
-    "permission_manager_count",
-    "active_manager_count",
-    "suc_execute_job",
-    "read_tasks",
-    "recommended_customers",
-    "read_customer_count",
-    "insight_customer_count",
-    "insight_count",
-    "phone_customer_count",
-    "phone_count",
-)
-RATIOS = {
-    "read_rate": ("read_tasks", "suc_execute_job"),
-    "plan_read_rate": ("read_customer_count", "recommended_customers"),
-    "click_to_insight_rate": (
-        "insight_customer_count",
-        "recommended_customers",
-    ),
-    "click_to_phone_rate": ("phone_customer_count", "recommended_customers"),
+# assemble/percentage 继续从本模块导出，保持路由、导出和测试的导入路径不变。
+from .task_type_report_rows import assemble, percentage  # noqa: F401
+from .task_type_report_sql import META_QUERY_NAMES, Scope, build_queries
+
+# 响应 warnings：顺序为期间口径、空名单或无匹配、技能明细不可相加。
+PERIOD_RATIOS = "period_ratios_not_cohort_conversion"
+EMPTY_ROSTER = "empty_roster"
+NO_MATCHING_ORGANIZATION = "no_matching_organization"
+NO_MATCHING_SKILLS = "no_matching_skills"
+SKILL_ROWS_NOT_ADDITIVE = "skill_rows_not_additive"
+# 错误码与稳定文案：路由按 code 映射 HTTP，不解析 message。
+DATABASE_UNAVAILABLE_CODE = "report_database_unavailable"
+DATABASE_UNAVAILABLE_MESSAGE = "报表数据库暂不可用。"
+ROSTER_AMBIGUOUS_CODE = "jkh_roster_ambiguous"
+ROSTER_AMBIGUOUS_MESSAGE = "名单快照中存在同一用户的多个机构归属。"
+SCOPE_FORBIDDEN_CODE = "report_scope_forbidden"
+# 互不依赖的事实查询并发上限；设为 1 即退回全部串行。
+REPORT_QUERY_CONCURRENCY = 4
+OPTION_COLUMNS = {
+    "branches": ("first_bbk_id", "first_bbk_nm"),
+    "orgs": ("org_id", "org_nm"),
 }
-DATABASE_UNAVAILABLE = "报表数据库暂不可用。"
+
 logger = logging.getLogger(__name__)
 _report_id = ContextVar("task_type_report_id", default=None)
+_report_stages = ContextVar("task_type_report_stages", default=None)
 
 
 @contextmanager
 def _report_stage(stage: str):
     """记录请求关联耗时；不记录 SQL 参数、人员信息和异常正文。"""
-    token = _report_id.set(uuid4().hex) if _report_id.get() is None else None
+    first = _report_id.get() is None
+    token = _report_id.set(uuid4().hex) if first else None
+    stages_token = _report_stages.set({}) if first else None
     started = perf_counter()
     status = "ok"
     details = {"rows": None}
@@ -67,211 +72,49 @@ def _report_stage(stage: str):
         status = type(exc).__name__
         raise
     finally:
+        elapsed_ms = (perf_counter() - started) * 1000
+        summary = _record_stage(stage, elapsed_ms, outermost=first)
         logger.info(
-            "task_type_report_timing report_id=%s stage=%s elapsed_ms=%.2f status=%s rows=%s",
+            "task_type_report_timing report_id=%s stage=%s elapsed_ms=%.2f status=%s rows=%s%s",
             _report_id.get(),
             stage,
-            (perf_counter() - started) * 1000,
+            elapsed_ms,
             status,
             details["rows"],
+            summary,
         )
+        if stages_token is not None:
+            _report_stages.reset(stages_token)
         if token is not None:
             _report_id.reset(token)
 
 
+def _record_stage(stage: str, elapsed_ms: float, *, outermost: bool) -> str:
+    """累计本次请求各阶段耗时；最外层阶段额外返回最慢子阶段的汇总字段。"""
+    stages = _report_stages.get()
+    if stages is None:
+        return ""
+    stages[stage] = stages.get(stage, 0.0) + elapsed_ms
+    if not outermost:
+        return ""
+    # 最外层阶段本身就是总耗时，只有它内部的阶段才对定位慢查询有意义。
+    inner = {name: ms for name, ms in stages.items() if name != stage}
+    if not inner:
+        return ""
+    slowest = max(inner, key=inner.get)
+    slowest_ms = inner[slowest]
+    return (
+        f" stages={len(stages)} slowest={slowest}"
+        f" slowest_ms={slowest_ms:.2f}"
+    )
+
+
 async def _fetch_report_query(db, name: str, query: tuple, *, one=False):
+    """执行一条报表查询，记录阶段耗时与返回行数。"""
     with _report_stage(name) as details:
         result = await (db.fetch_one(*query) if one else db.fetch_all(*query))
         details["rows"] = int(result is not None) if one else len(result)
         return result
-
-
-def date_bounds(start_date: date, end_date: date) -> tuple[datetime, datetime]:
-    """日期首尾均包含；数据库查询统一使用半开区间。"""
-    return datetime.combine(start_date, time.min), datetime.combine(
-        end_date + timedelta(days=1), time.min
-    )
-
-
-def percentage(numerator: int | None, denominator: int | None) -> float | None:
-    if numerator is None or denominator in (None, 0):
-        return None
-    return float(
-        (Decimal(numerator) * 100 / Decimal(denominator)).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-    )
-
-
-def _empty_rows(dimensions: list[dict], group_by: str) -> dict:
-    """为传入的有效维度补齐三类任务。"""
-    rows = {}
-    for dimension in dimensions:
-        for task_type in TASK_TYPES:
-            key = (
-                dimension["group_bbk"],
-                dimension["group_org"],
-                dimension.get("group_user", ""),
-                task_type,
-            )
-            row = {field: 0 for field in COUNTS}
-            row.update(
-                first_bbk_id=key[0] if group_by != "overall" else None,
-                org_id=key[1] if group_by in ("org", "manager") else None,
-                first_bbk_name=(
-                    dimension["first_bbk_name"]
-                    if group_by != "overall"
-                    else None
-                ),
-                org_name=(
-                    dimension["org_name"]
-                    if group_by in ("org", "manager")
-                    else None
-                ),
-                user_id=key[2] if group_by == "manager" else None,
-                user_name=dimension.get("user_name"),
-                sapid=key[2] if group_by == "manager" else None,
-                pst_lvl=dimension.get("pst_lvl"),
-                skill_id=None,
-                cn_name=None,
-                task_type=task_type,
-                task_type_name=LABELS[task_type],
-                permission_manager_count=int(
-                    dimension["permission_manager_count"]
-                ),
-            )
-            rows[key] = row
-    return rows
-
-
-def _finish_row(row: dict) -> dict:
-    if row["task_type"] == "ask_plan":
-        row["active_manager_count"] = None
-    if row["task_type"] == "push_other":
-        for field in (
-            "recommended_customers",
-            "read_customer_count",
-            "insight_customer_count",
-            "insight_count",
-            "phone_customer_count",
-            "phone_count",
-        ):
-            row[field] = None
-    for field, (numerator, denominator) in RATIOS.items():
-        row[field] = percentage(row[numerator], row[denominator])
-    return row
-
-
-def assemble(
-    results: dict[str, list[dict]], group_by: str, skill_detail: bool = False
-) -> list[dict]:
-    """只合并数据库聚合结果；绝不累加分组后的 DISTINCT 计数生成总行。"""
-    # 是否有事实由查询返回的分组决定，不能用指标是否为零判断。
-    fact_dimensions = {
-        (
-            record["group_bbk"],
-            record["group_org"],
-            record.get("group_user", ""),
-        )
-        for name, records in results.items()
-        if name not in ("permissions", "roster_conflicts")
-        for record in records
-    }
-    dimensions = [
-        record
-        for record in results["permissions"]
-        if (
-            record["group_bbk"],
-            record["group_org"],
-            record.get("group_user", ""),
-        )
-        in fact_dimensions
-    ]
-    base_rows = _empty_rows(dimensions, group_by)
-    rows = {} if skill_detail else base_rows
-    for name, records in results.items():
-        if name in ("permissions", "roster_conflicts"):
-            continue
-        for record in records:
-            key = (
-                record["group_bbk"],
-                record["group_org"],
-                record.get("group_user", ""),
-                record["task_type"],
-            )
-            if key not in base_rows:
-                raise ValueError("roster changed during report query")
-            if skill_detail:
-                key = _expand_skill_rows(rows, base_rows, key, record)
-            for field in COUNTS:
-                if field in record:
-                    rows[key][field] = int(record[field] or 0)
-    return [
-        _finish_row(rows[key])
-        for key in sorted(
-            rows,
-            key=lambda k: (
-                k[0] is not None,
-                k[0] or "",
-                k[1] is not None,
-                k[1] or "",
-                k[2],
-                k[4] if skill_detail else "",
-                TASK_TYPES.index(k[3]),
-            ),
-        )
-    ]
-
-
-def _expand_skill_rows(
-    rows: dict, base_rows: dict, key: tuple, record: dict
-) -> tuple:
-    """只展开有事实关联的人员/机构与技能组合，不做名单×技能笛卡尔积。"""
-    for task_type in TASK_TYPES:
-        base_key = (*key[:3], task_type)
-        skill_key = (*base_key, record["skill_id"])
-        if skill_key not in rows:
-            rows[skill_key] = {
-                **base_rows[base_key],
-                "skill_id": record["skill_id"],
-                "cn_name": record["cn_name"],
-            }
-    return (*key, record["skill_id"])
-
-
-async def query_core(db, scope: Scope) -> list[dict]:
-    """db 使用现有 DatabaseConnection；空快照应在调用此函数之前处理。"""
-    queries = build_queries(scope)
-    conflicts = await _fetch_report_query(
-        db, "roster_conflicts", queries["roster_conflicts"]
-    )
-    if conflicts:
-        raise ReportError(
-            503,
-            "jkh_roster_ambiguous",
-            "名单快照中存在同一用户的多个机构归属。",
-        )
-    results = {}
-    for name, (sql, params) in queries.items():
-        if name not in ("roster_conflicts", "permissions"):
-            results[name] = await _fetch_report_query(db, name, (sql, params))
-    dimension_keys = {
-        (row["group_bbk"], row["group_org"], row.get("group_user", ""))
-        for records in results.values()
-        for row in records
-    }
-    if not dimension_keys:
-        return []
-    permission_query = build_queries(
-        scope, permission_keys=tuple(dimension_keys)
-    )["permissions"]
-    results["permissions"] = await _fetch_report_query(
-        db, "permissions", permission_query
-    )
-    with _report_stage("assemble") as details:
-        rows = assemble(results, scope.group_by, scope.skill_detail)
-        details["rows"] = len(rows)
-        return rows
 
 
 class ReportError(Exception):
@@ -281,6 +124,77 @@ class ReportError(Exception):
         super().__init__(message)
         self.status_code = status_code
         self.code = code
+
+
+def report_db():
+    """取现有连接池；不可用时映射为稳定的 503。"""
+    try:
+        db = get_db_connection()
+    except RuntimeError as exc:
+        raise ReportError(
+            503, DATABASE_UNAVAILABLE_CODE, DATABASE_UNAVAILABLE_MESSAGE
+        ) from exc
+    if not db.is_connected:
+        raise ReportError(
+            503, DATABASE_UNAVAILABLE_CODE, DATABASE_UNAVAILABLE_MESSAGE
+        )
+    return db
+
+
+def enforce_branch(params, bbk_id: str):
+    """使用现有可信网关传入的分行范围；客户端筛选只能收窄。"""
+    if (
+        not isinstance(bbk_id, str)
+        or not bbk_id.strip()
+        or len(bbk_id.strip()) > 64
+    ):
+        raise ReportError(
+            422, "report_scope_required", "必须提供有效的 X-Bbk-Id。"
+        )
+    bbk_id = bbk_id.strip()
+    if bbk_id != "100":
+        if params.first_bbk_id is not None and params.first_bbk_id != bbk_id:
+            raise ReportError(
+                403, SCOPE_FORBIDDEN_CODE, "不能查询其他分行的数据。"
+            )
+        return params.model_copy(update={"first_bbk_id": bbk_id})
+    return params
+
+
+async def validate_roster_scope(
+    db, sync_date: str, params: TaskTypeReportParams
+):
+    """存在但不属于有效分行/网点的 ID 报 403；不存在的 ID 保留空结果。"""
+    selectors = (
+        ("org_id", params.org_id),
+        ("user_id", params.user_id),
+        ("first_bbk_nm", params.first_bbk_name),
+        ("org_nm", params.org_name),
+    )
+    for column, value in selectors:
+        if value is None:
+            continue
+        conditions, allowed_params = [], []
+        if params.first_bbk_id is not None:
+            conditions.append("first_bbk_id = %s")
+            allowed_params.append(params.first_bbk_id)
+        if column == "user_id" and params.org_id is not None:
+            conditions.append("org_id = %s")
+            allowed_params.append(params.org_id)
+        if not conditions:
+            continue
+        allowed = " AND ".join(conditions)
+        row = await db.fetch_one(
+            f"SELECT COUNT(*) AS total, SUM(CASE WHEN {allowed} THEN 1 ELSE 0 END) AS allowed "
+            f"FROM jkh_user_inf WHERE sync_date = %s AND {column} = %s",
+            tuple(allowed_params + [sync_date, value]),
+        )
+        if row and row["total"] and not row["allowed"]:
+            raise ReportError(
+                403,
+                SCOPE_FORBIDDEN_CODE,
+                "所选机构或客户经理不属于允许的查询范围。",
+            )
 
 
 async def resolve_organization_filters(
@@ -319,99 +233,83 @@ async def resolve_organization_filters(
     return True, resolved
 
 
-def enforce_branch(params, bbk_id: str):
-    """使用现有可信网关传入的分行范围；客户端筛选只能收窄。"""
-    if (
-        not isinstance(bbk_id, str)
-        or not bbk_id.strip()
-        or len(bbk_id.strip()) > 64
-    ):
-        raise ReportError(
-            422, "report_scope_required", "必须提供有效的 X-Bbk-Id。"
-        )
-    bbk_id = bbk_id.strip()
-    if bbk_id != "100":
-        if params.first_bbk_id is not None and params.first_bbk_id != bbk_id:
-            raise ReportError(
-                403, "report_scope_forbidden", "不能查询其他分行的数据。"
-            )
-        return params.model_copy(update={"first_bbk_id": bbk_id})
-    return params
-
-
-def report_db():
-    try:
-        db = get_db_connection()
-    except RuntimeError as exc:
-        raise ReportError(
-            503, "report_database_unavailable", DATABASE_UNAVAILABLE
-        ) from exc
-    if not db.is_connected:
-        raise ReportError(
-            503, "report_database_unavailable", DATABASE_UNAVAILABLE
-        )
-    return db
-
-
-async def validate_roster_scope(
-    db, sync_date: str, params: TaskTypeReportParams
-):
-    """存在但不属于有效分行/网点的 ID 报 403；不存在的 ID 保留空结果。"""
-    selectors = (
-        ("org_id", params.org_id),
-        ("user_id", params.user_id),
-        ("first_bbk_nm", params.first_bbk_name),
-        ("org_nm", params.org_name),
-    )
-    for column, value in selectors:
-        if value is None:
-            continue
-        conditions, allowed_params = [], []
-        if params.first_bbk_id is not None:
-            conditions.append("first_bbk_id = %s")
-            allowed_params.append(params.first_bbk_id)
-        if column == "user_id" and params.org_id is not None:
-            conditions.append("org_id = %s")
-            allowed_params.append(params.org_id)
-        if not conditions:
-            continue
-        allowed = " AND ".join(conditions)
-        row = await db.fetch_one(
-            f"SELECT COUNT(*) AS total, SUM(CASE WHEN {allowed} THEN 1 ELSE 0 END) AS allowed "
-            f"FROM jkh_user_inf WHERE sync_date = %s AND {column} = %s",
-            tuple(allowed_params + [sync_date, value]),
-        )
-        if row and row["total"] and not row["allowed"]:
-            raise ReportError(
-                403,
-                "report_scope_forbidden",
-                "所选机构或客户经理不属于允许的查询范围。",
-            )
-
-
-async def query_page(db, scope: Scope, params: TaskTypeReportParams):
-    # 检查全快照冲突，空页也不能跳过该校验。
-    conflicts = await _fetch_report_query(
-        db, "page_roster_conflicts", build_queries(scope)["roster_conflicts"]
-    )
+async def _assert_unique_roster(db, query: tuple, *, stage: str):
+    """同一用户多个机构归属时整份报表失败；空页也不能跳过该校验。"""
+    conflicts = await _fetch_report_query(db, stage, query)
     if conflicts:
-        raise ReportError(
-            503,
-            "jkh_roster_ambiguous",
-            "名单快照中存在同一用户的多个机构归属。",
-        )
-    key_sql, values = build_queries(scope, keys_only=True)["keys"]
-    count = await _fetch_report_query(
+        raise ReportError(503, ROSTER_AMBIGUOUS_CODE, ROSTER_AMBIGUOUS_MESSAGE)
+
+
+async def _run_queries(db, queries: dict, *, concurrency: int) -> dict:
+    """受限并发执行互不依赖的聚合查询。
+
+    任一查询失败都让整份报表失败；为了留下完整的分阶段诊断，这里会等
+    所有查询结束后再抛出第一个异常，不返回部分指标。
+    """
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def run(name: str, query: tuple):
+        async with semaphore:
+            return name, await _fetch_report_query(db, name, query)
+
+    tasks = [
+        asyncio.create_task(run(name, query))
+        for name, query in queries.items()
+    ]
+    completed = await asyncio.gather(*tasks, return_exceptions=True)
+    for item in completed:
+        if isinstance(item, BaseException):
+            raise item
+    return dict(completed)
+
+
+async def query_core(
+    db, scope: Scope, *, concurrency: int = REPORT_QUERY_CONCURRENCY
+) -> list[dict]:
+    """db 使用现有 DatabaseConnection；空快照应在调用此函数之前处理。"""
+    queries = build_queries(scope)
+    await _assert_unique_roster(
+        db, queries["roster_conflicts"], stage="roster_conflicts"
+    )
+    facts = {
+        name: query
+        for name, query in queries.items()
+        if name not in META_QUERY_NAMES
+    }
+    results = await _run_queries(db, facts, concurrency=concurrency)
+    dimension_keys = {
+        (row["group_bbk"], row["group_org"], row.get("group_user", ""))
+        for records in results.values()
+        for row in records
+    }
+    if not dimension_keys:
+        return []
+    permission_query = build_queries(
+        scope, permission_keys=tuple(dimension_keys)
+    )["permissions"]
+    results["permissions"] = await _fetch_report_query(
+        db, "permissions", permission_query
+    )
+    with _report_stage("assemble") as details:
+        rows = assemble(results, scope.group_by, scope.skill_detail)
+        details["rows"] = len(rows)
+        return rows
+
+
+async def _fetch_page_total(db, key_sql: str, values: tuple) -> int:
+    row = await _fetch_report_query(
         db,
         "page_count",
         (f"SELECT COUNT(*) AS total FROM ({key_sql}) dimension_keys", values),
         one=True,
     )
-    total = int(count["total"] or 0)
-    offset = (params.page - 1) * params.page_size
-    if offset >= total:
-        return [], total
-    page_keys = await _fetch_report_query(
+    return int(row["total"] or 0)
+
+
+async def _fetch_page_keys(
+    db, key_sql: str, values: tuple, params: TaskTypeReportParams, offset: int
+) -> list[dict]:
+    return await _fetch_report_query(
         db,
         "page_keys",
         (
@@ -422,6 +320,27 @@ async def query_page(db, scope: Scope, params: TaskTypeReportParams):
             values + (params.page_size, offset),
         ),
     )
+
+
+async def query_page(
+    db,
+    scope: Scope,
+    params: TaskTypeReportParams,
+    *,
+    concurrency: int = REPORT_QUERY_CONCURRENCY,
+):
+    """经理/技能分页：先取事实键与总数，再按本页键执行同一套聚合查询。"""
+    queries = build_queries(scope)
+    # 检查全快照冲突，空页也不能跳过该校验。
+    await _assert_unique_roster(
+        db, queries["roster_conflicts"], stage="page_roster_conflicts"
+    )
+    key_sql, values = build_queries(scope, keys_only=True)["keys"]
+    total = await _fetch_page_total(db, key_sql, values)
+    offset = (params.page - 1) * params.page_size
+    if offset >= total:
+        return [], total
+    page_keys = await _fetch_page_keys(db, key_sql, values, params, offset)
     if not page_keys:
         return [], total
     scoped_page = replace(
@@ -430,102 +349,194 @@ async def query_page(db, scope: Scope, params: TaskTypeReportParams):
             (row["group_user"], row["skill_id"]) for row in page_keys
         ),
     )
-    return await query_core(db, scoped_page), total
+    return await query_core(db, scoped_page, concurrency=concurrency), total
+
+
+async def _resolve_snapshot(db, params: TaskTypeReportParams) -> str | None:
+    """名单快照按截止日、月末、最早/最新回退；无快照时不再查事实。"""
+    with _report_stage("resolve_snapshot"):
+        return await QueryService._resolve_jkh_sync_date(
+            db, datetime.combine(params.end_date, time.max)
+        )
+
+
+async def _resolve_scope(
+    db, sync_date: str, params: TaskTypeReportParams
+) -> tuple[bool, dict]:
+    """校验可信范围并解析机构名称；解析出 ID 时再校验一次范围。"""
+    with _report_stage("validate_scope"):
+        await validate_roster_scope(db, sync_date, params)
+    with _report_stage("resolve_filters"):
+        matched, filters = await resolve_organization_filters(
+            db, sync_date, params
+        )
+    if matched and (
+        filters["first_bbk_id"] != params.first_bbk_id
+        or filters["org_id"] != params.org_id
+    ):
+        with _report_stage("validate_resolved_scope"):
+            await validate_roster_scope(
+                db, sync_date, params.model_copy(update=filters)
+            )
+    return matched, filters
+
+
+def date_bounds(start_date: date, end_date: date) -> tuple[datetime, datetime]:
+    """日期首尾均包含；数据库查询统一使用半开区间。"""
+    return datetime.combine(start_date, time.min), datetime.combine(
+        end_date + timedelta(days=1), time.min
+    )
+
+
+def _build_scope(
+    params: TaskTypeReportParams, source_id: str, sync_date: str, filters: dict
+) -> Scope:
+    start, stop = date_bounds(params.start_date, params.end_date)
+    return Scope(
+        source_id=source_id,
+        sync_date=sync_date,
+        start=start,
+        stop=stop,
+        group_by=params.group_by,
+        skill_detail=params.skill_detail,
+        user_id=params.user_id,
+        keyword=params.keyword,
+        **filters,
+    )
+
+
+def _unresolved_filters(params: TaskTypeReportParams) -> dict:
+    """未经名称解析时的原始筛选范围。"""
+    return {"first_bbk_id": params.first_bbk_id, "org_id": params.org_id}
+
+
+def _warnings(
+    params: TaskTypeReportParams,
+    sync_date: str | None,
+    matched: bool,
+    items: list[dict],
+    total: int | None,
+) -> list[str]:
+    """固定顺序：期间口径、空名单或无匹配、技能明细不可相加。"""
+    warnings = [PERIOD_RATIOS]
+    if sync_date is None:
+        warnings.append(EMPTY_ROSTER)
+    elif not items and not total:
+        warnings.append(
+            NO_MATCHING_SKILLS
+            if matched and params.skill_detail
+            else NO_MATCHING_ORGANIZATION
+        )
+    if params.skill_detail:
+        warnings.append(SKILL_ROWS_NOT_ADDITIVE)
+    return warnings
+
+
+def _build_response(
+    *,
+    params: TaskTypeReportParams,
+    source_id: str,
+    sync_date: str | None,
+    filters: dict,
+    items: list[dict],
+    total: int | None,
+    warnings: list[str],
+) -> TaskTypeReportResponse:
+    """统一填充元数据、任务类型过滤和分页信息。"""
+    if params.task_type is not None:
+        items = [
+            item for item in items if item["task_type"] == params.task_type
+        ]
+    if total is None:
+        total = len(items)
+    return TaskTypeReportResponse(
+        start_date=params.start_date,
+        end_date=params.end_date,
+        source_id=source_id,
+        sync_date=sync_date,
+        group_by=params.group_by,
+        skill_detail=params.skill_detail,
+        resolved_filters=filters,
+        warnings=warnings,
+        items=items,
+        page=params.page,
+        page_size=params.page_size,
+        total=total,
+        has_more=(
+            params.page is not None and params.page * params.page_size < total
+        ),
+    )
+
+
+async def _fetch_options(
+    db, params: ReportOptionsParams, sync_date: str
+) -> list[dict]:
+    """按 kind 选择 ID/名称列，只返回快照内非空的机构。"""
+    id_column, name_column = OPTION_COLUMNS[params.kind]
+    conditions, values = ["sync_date = %s"], [sync_date]
+    if params.first_bbk_id is not None:
+        conditions.append("first_bbk_id = %s")
+        values.append(params.first_bbk_id)
+    return await db.fetch_all(
+        f"SELECT {id_column} AS value, "
+        f"COALESCE(MIN(NULLIF({name_column}, '')), {id_column}) AS label "
+        f"FROM jkh_user_inf WHERE {' AND '.join(conditions)} "
+        f"AND {id_column} IS NOT NULL AND TRIM({id_column}) <> '' "
+        f"GROUP BY {id_column} ORDER BY {id_column}",
+        tuple(values),
+    )
 
 
 class TaskTypeReportService:
     """请求状态均为局部变量；统计、选项、导出共用快照和范围规则。"""
 
+    def __init__(self, concurrency: int = REPORT_QUERY_CONCURRENCY):
+        # 事实查询并发上限；调小可降低数据库瞬时压力，设为 1 即串行。
+        self._concurrency = max(1, concurrency)
+
     async def get_report(
         self, params: TaskTypeReportParams, source_id: str, bbk_id: str
     ) -> TaskTypeReportResponse:
-        with _report_stage("get_report"):
+        """统计主流程：可信范围 → 名单快照 → 名称解析 → 聚合 → 组装。"""
+        with _report_stage("get_report") as details:
             params = enforce_branch(params, bbk_id)
             db = report_db()
-            with _report_stage("resolve_snapshot"):
-                sync_date = await QueryService._resolve_jkh_sync_date(
-                    db, datetime.combine(params.end_date, time.max)
-                )
-            filters = {
-                "first_bbk_id": params.first_bbk_id,
-                "org_id": params.org_id,
-            }
-            warnings = ["period_ratios_not_cohort_conversion"]
+            sync_date = await _resolve_snapshot(db, params)
+            matched = False
+            filters = _unresolved_filters(params)
             items, total = [], None
-            if sync_date is None:
-                warnings.append("empty_roster")
-            else:
-                with _report_stage("validate_scope"):
-                    await validate_roster_scope(db, sync_date, params)
-                with _report_stage("resolve_filters"):
-                    matched, filters = await resolve_organization_filters(
-                        db, sync_date, params
-                    )
+            if sync_date is not None:
+                matched, filters = await _resolve_scope(db, sync_date, params)
                 if matched:
-                    if (
-                        filters["first_bbk_id"] != params.first_bbk_id
-                        or filters["org_id"] != params.org_id
-                    ):
-                        with _report_stage("validate_resolved_scope"):
-                            await validate_roster_scope(
-                                db,
-                                sync_date,
-                                params.model_copy(update=filters),
-                            )
-                    start, stop = date_bounds(
-                        params.start_date, params.end_date
-                    )
-                    scope = Scope(
-                        source_id=source_id,
-                        sync_date=sync_date,
-                        start=start,
-                        stop=stop,
-                        group_by=params.group_by,
-                        skill_detail=params.skill_detail,
-                        user_id=params.user_id,
-                        keyword=params.keyword,
-                        **filters,
-                    )
-                    if params.page is not None:
-                        items, total = await query_page(db, scope, params)
-                    else:
-                        items = await query_core(db, scope)
-                if not items and not total:
-                    warnings.append(
-                        "no_matching_skills"
-                        if matched and params.skill_detail
-                        else "no_matching_organization"
-                    )
-            if params.task_type is not None:
-                items = [
-                    item
-                    for item in items
-                    if item["task_type"] == params.task_type
-                ]
-            if total is None:
-                total = len(items)
-            if params.skill_detail:
-                warnings.append("skill_rows_not_additive")
-            return TaskTypeReportResponse(
-                start_date=params.start_date,
-                end_date=params.end_date,
+                    scope = _build_scope(params, source_id, sync_date, filters)
+                    items, total = await self._collect(db, scope, params)
+            response = _build_response(
+                params=params,
                 source_id=source_id,
                 sync_date=sync_date,
-                group_by=params.group_by,
-                skill_detail=params.skill_detail,
-                resolved_filters=filters,
-                warnings=warnings,
+                filters=filters,
                 items=items,
-                page=params.page,
-                page_size=params.page_size,
                 total=total,
-                has_more=params.page is not None
-                and params.page * params.page_size < total,
+                warnings=_warnings(params, sync_date, matched, items, total),
             )
+            details["rows"] = len(response.items)
+            return response
+
+    async def _collect(
+        self, db, scope: Scope, params: TaskTypeReportParams
+    ) -> tuple[list[dict], int | None]:
+        """分页请求走 page 路径，其余请求一次性取全量分组。"""
+        if params.page is not None:
+            return await query_page(
+                db, scope, params, concurrency=self._concurrency
+            )
+        rows = await query_core(db, scope, concurrency=self._concurrency)
+        return rows, None
 
     async def get_options(
         self, params: ReportOptionsParams, source_id: str, bbk_id: str
     ) -> ReportOptionsResponse:
+        """分行/支行下拉选项；与统计接口共用快照解析和分行范围规则。"""
         params = enforce_branch(params, bbk_id)
         if params.kind == "orgs" and params.first_bbk_id is None:
             raise ReportError(
@@ -537,22 +548,8 @@ class TaskTypeReportService:
         )
         if sync_date is None:
             return ReportOptionsResponse(sync_date=None, items=[])
-        id_column, name_column = (
-            ("first_bbk_id", "first_bbk_nm")
-            if params.kind == "branches"
-            else ("org_id", "org_nm")
-        )
-        branch_filter, values = "", [sync_date]
-        if params.first_bbk_id is not None:
-            branch_filter = " AND first_bbk_id = %s"
-            values.append(params.first_bbk_id)
-        rows = await db.fetch_all(
-            f"SELECT {id_column} AS value, COALESCE(MIN(NULLIF({name_column}, '')), {id_column}) AS label "
-            f"FROM jkh_user_inf WHERE sync_date = %s AND {id_column} IS NOT NULL "
-            f"AND TRIM({id_column}) <> '' {branch_filter} GROUP BY {id_column} ORDER BY {id_column}",
-            tuple(values),
-        )
-        return ReportOptionsResponse(sync_date=sync_date, items=rows)
+        items = await _fetch_options(db, params, sync_date)
+        return ReportOptionsResponse(sync_date=sync_date, items=items)
 
 
 def get_task_type_report_service() -> TaskTypeReportService:

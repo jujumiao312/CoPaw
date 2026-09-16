@@ -58,7 +58,8 @@ src/monitor/app/
 ├── routers/task_type_report.py          # 新增：一个 GET 接口
 ├── routers/__init__.py                  # 增加路由挂载
 └── services/cron/
-    ├── task_type_report.py              # 新增：服务、名称解析、组装
+    ├── task_type_report.py              # 新增：服务、名称解析、查询编排与阶段日志
+    ├── task_type_report_rows.py         # 后续拆分：纯行组装与派生比例
     ├── task_type_report_sql.py          # 新增：Scope、绑定及查询构造
     └── task_type_report_export.py       # 新增：全量 XLSX 生成
 tests/
@@ -73,8 +74,9 @@ tests/
 | 参考内容 | 正式落点 |
 | --- | --- |
 | `Scope / bind / build_queries` | `task_type_report_sql.py` |
-| `TASK_TYPES / LABELS / COUNTS / RATIOS` | 就近保留在服务或模型模块，避免循环导入 |
-| `date_bounds / percentage / assemble / query_core` | `task_type_report.py`，其中 query_core 可成为服务私有方法 |
+| `TASK_TYPES / LABELS / COUNTS / RATIOS` | `task_type_report_rows.py`，与行组装放在一起，避免循环导入 |
+| `date_bounds / query_core` | `task_type_report.py`；query_core 自 2026-09-16 起按受限并发执行事实查询 |
+| `percentage / assemble` | `task_type_report_rows.py`，并由服务模块再导出以兼容既有导入路径 |
 | 本包测试夹具与断言 | `test_task_type_report_queries.py`，修改导入路径 |
 | IMPLEMENTATION.md 的契约 | Pydantic 模型和新路由 |
 

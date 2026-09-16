@@ -1,5 +1,16 @@
 # 金葵花任务类型报表 build_queries 梳理
 
+## 2026-09-16 结构与排查入口
+
+| 文件 | 职责 |
+| --- | --- |
+| `task_type_report.py` | 服务与编排：名单快照、范围校验、名称解析、查询执行（`query_core` / `query_page`）、阶段计时与 `TaskTypeReportService` |
+| `task_type_report_rows.py` | 纯行组装：三类任务补齐、空值语义、派生比例（`assemble`、`percentage`），不访问数据库、不打日志 |
+| `task_type_report_sql.py` | 参数化聚合 SQL 构造（`Scope`、`build_queries`、`META_QUERY_NAMES`） |
+| `task_type_report_export.py`、`routers/task_type_report.py` | XLSX 导出与 HTTP 契约，本次未改动 |
+
+`get_report` 现在是线性流程：`enforce_branch` → `report_db` → `_resolve_snapshot` → `_resolve_scope` → `_build_scope` → `_collect`（分页或全量）→ `_build_response`，每一步的耗时都对应一个 `stage`。排查慢查询或超时先看日志，不要先读 SQL。
+
 ## 期间事实与慢查询排查（2026-09-16）
 
 权限查询优化后的复测：对比同样请求的 `stage=permissions elapsed_ms` 和 `rows`，同时查看 `get_report` 总耗时。分支行权限结果现在只包含事实机构，但每个机构人数仍按完整名单计算。无事实时不会出现 permissions 阶段日志。执行顺序改为事实在前、权限在后，不能拿日志行顺序当作查询丢失。
@@ -10,7 +21,7 @@
 
 服务以 INFO 级别记录 `task_type_report_timing`，保持 `MONITOR_LOG_LEVEL=info` 即可。日志不含 SQL、绑定参数或人员信息。筛选同一个 `report_id` 后比较 `elapsed_ms`：
 
-- `get_report`：方法总耗时，包含响应模型构造，不含路由 JSON 序列化、XLSX 文件生成和网络传输；它包含其他阶段，不能与子阶段相加。
+- `get_report`：方法总耗时，包含响应模型构造，不含路由 JSON 序列化、XLSX 文件生成和网络传输；它包含其他阶段，不能与子阶段相加。该行额外带 `stages`、`slowest`、`slowest_ms`，即本次请求记录了多少阶段、除总耗时外最慢的子阶段是谁；`rows` 为最终返回行数。先看这一行，再决定是否展开逐阶段日志。
 - `resolve_snapshot` / `validate_scope` / `resolve_filters` / `validate_resolved_scope`：快照选择、范围校验和名称解析。
 - `roster_conflicts` / `permissions` / `push_tasks` / `ask_tasks` / `active` / `push_skills` / `ask_skills` / `push_customers` / `ask_customers` / `clicks`：对应同名 SQL，`rows` 为返回聚合行数。
 - `page_roster_conflicts` / `page_count` / `page_keys`：分页前校验、事实键计数与取页。
@@ -18,7 +29,9 @@
 
 `status=ok` 表示正常结束；异常记录异常类型并原样抛出；路由超时取消会记录 `CancelledError`。并发请求用独立 `report_id`，多实例部署同时保留容器/实例日志标签。
 
-数据库调用的计时包含连接池等待、SQL 执行、传输和结果转换，不能直接等同于数据库执行时间。核心查询目前串行执行，总耗时会累积；不要未经测量直接并发全部查询，以免放大连接池和数据库压力。
+正常的非分页请求固定是 11 条查询、15 个阶段（含 `get_report` 自身）；命中名称解析会多一个 `validate_resolved_scope`（16 个阶段）；经理分页请求另有 `page_roster_conflicts` / `page_count` / `page_keys` 三个阶段。阶段数与预期不符时先确认命中的是哪条分支，再查改动。
+
+数据库调用的计时包含连接池等待、SQL 执行、传输和结果转换，不能直接等同于数据库执行时间。事实查询自 2026-09-16 起按 `REPORT_QUERY_CONCURRENCY`（默认 4）受限并发，可用 `TaskTypeReportService(concurrency=...)` 覆盖，设为 1 即退回全部串行；`roster_conflicts`、`permissions` 和三个分页阶段仍串行。并发只压缩总耗时（从"各查询相加"变成"约等于最慢一批"），不改变查询条数和指标口径。多条查询同时取连接时，阶段耗时会把连接池排队时间算进去，判断数据库侧耗时要结合 EXPLAIN 与连接池指标；需要区分时把并发调回 1 复测即可。
 
 定位到慢查询名后，在相同 Scope 下取得实际参数化 SQL，通过现有连接执行普通 EXPLAIN：
 
@@ -36,7 +49,7 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
 
 对象文件：`src/monitor/app/services/cron/task_type_report_sql.py`。
 
-消费方：`src/monitor/app/services/cron/task_type_report.py` 的 `query_core` 与 `assemble`。
+消费方：`src/monitor/app/services/cron/task_type_report.py` 的 `query_core`（快照、范围、并发编排与阶段日志）与 `task_type_report_rows.py` 的 `assemble`（纯行组装）。
 
 统计口径真源是 [DESIGN.md](../../docs/superpowers/specs/2026-09-13-jkh-task-report/DESIGN.md)。本文只梳理 `build_queries` 的代码结构与契约，不重复口径定义；口径有疑问时以 DESIGN.md 为准。
 
@@ -150,4 +163,4 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
 
 Linux 使用 `venv/bin/python -m pytest ...`。
 
-`test_task_type_report_queries.py` 覆盖指标与去重、三种分组、筛选绑定与空结果、机构冲突先于筛选、点击人与任务 owner 使用独立名单、主动查看等于成功数且不依赖埋点、删除 job 的历史保留、反连接使用全部执行历史、overall 不等于分行相加，以及比例计算与参数绑定。
+`test_task_type_report_queries.py` 覆盖指标与去重、三种分组、筛选绑定与空结果、机构冲突先于筛选、点击人与任务 owner 使用独立名单、主动查看等于成功数且不依赖埋点、删除 job 的历史保留、反连接使用全部执行历史、overall 不等于分行相加，以及比例计算与参数绑定。并发与日志是两项独立契约测试：`test_fact_queries_run_concurrently_with_stable_results` 锁定"并发不改变查询条数与结果、在飞查询数受 `REPORT_QUERY_CONCURRENCY` 限制"，`test_timing_log_names_slowest_stage` 锁定"只有最外层阶段带 `stages` / `slowest` 汇总字段，且阶段数与该 `report_id` 的日志行数一致"。
