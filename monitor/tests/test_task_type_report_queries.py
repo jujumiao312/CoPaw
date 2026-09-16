@@ -317,6 +317,68 @@ def test_page_keys_dedupe_facts_before_roster_mapping(scope):
     assert "jkh.user_id = pairs.group_user" in keys_sql
 
 
+PUSH_TABLE = "FROM (SELECT e.id, e.trace_id"
+ASK_TABLE = "FROM (SELECT sp.trace_id, sp.source_id"
+CLICK_TABLE = "FROM (SELECT c.user_id, c.customer_id"
+
+
+@pytest.mark.parametrize(
+    "task_type,expected",
+    [
+        (
+            "push_plan",
+            {
+                "push_tasks",
+                "active",
+                "push_skills",
+                "push_customers",
+                "clicks",
+            },
+        ),
+        ("ask_plan", {"ask_tasks", "ask_skills", "ask_customers", "clicks"}),
+        ("push_other", {"push_tasks", "active", "push_skills"}),
+    ],
+)
+def test_single_task_type_builds_only_related_queries(
+    scope, task_type, expected
+):
+    """方案 B：单类型只构造该类型涉及的查询，并在 SQL 内按类型收窄。"""
+    scoped = replace(scope, group_by="manager", task_type=task_type)
+    queries = build_queries(scoped)
+    assert set(queries) == {"roster_conflicts", "permissions"} | expected
+    for name in ("push_tasks", "active", "push_skills"):
+        if name in queries:
+            sql, values = queries[name]
+            assert "p.task_type = %s" in sql
+            assert task_type in values
+    if "clicks" in queries:
+        assert "c.task_type = %s" in queries["clicks"][0]
+    # 未指定类型时行为不变：8 条事实查询全在。
+    assert len(build_queries(replace(scope, group_by="manager"))) == 10
+
+
+@pytest.mark.parametrize(
+    "task_type,expected,unexpected",
+    [
+        ("push_plan", (PUSH_TABLE, CLICK_TABLE), (ASK_TABLE,)),
+        ("ask_plan", (ASK_TABLE, CLICK_TABLE), (PUSH_TABLE,)),
+        ("push_other", (PUSH_TABLE,), (ASK_TABLE, CLICK_TABLE)),
+    ],
+)
+def test_page_keys_follow_requested_task_type(
+    scope, task_type, expected, unexpected
+):
+    """分页键只取该类型的事实路径，不再用全类型并集占页。"""
+    scoped = replace(scope, group_by="manager", task_type=task_type)
+    keys_sql = build_queries(scoped, keys_only=True)["keys"][0]
+    for marker in expected:
+        assert marker in keys_sql
+    for marker in unexpected:
+        assert marker not in keys_sql
+    if task_type == "push_other":
+        assert "p.task_type = %s" in keys_sql
+
+
 class AsyncQueryDb:
     """执行真实查询，保留调用记录以验证固定查询数和早退。"""
 

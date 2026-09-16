@@ -12,6 +12,9 @@
 - SQL 排查：本模块执行（且仅限本模块执行）的每条查询另外输出一行
   ``task_type_report_sql``，带 ``query``、``sql`` 和 ``params``；``params``
   包含查询条件本身，只用于核对结果口径，不要对外转发。
+- 单类型收窄：``params.task_type`` 会进入 ``Scope``，只执行该类型涉及的查询，
+  维度骨架也只取该类型的事实路径；不传 ``task_type`` 时才回到全类型并集和三
+  类任务。
 """
 
 import asyncio
@@ -314,13 +317,22 @@ async def _run_queries(db, queries: dict, *, concurrency: int) -> dict:
 
 
 async def query_core(
-    db, scope: Scope, *, concurrency: int = REPORT_QUERY_CONCURRENCY
+    db,
+    scope: Scope,
+    *,
+    concurrency: int = REPORT_QUERY_CONCURRENCY,
+    assert_roster: bool = True,
 ) -> list[dict]:
-    """db 使用现有 DatabaseConnection；空快照应在调用此函数之前处理。"""
+    """db 使用现有 DatabaseConnection；空快照应在调用此函数之前处理。
+
+    ``assert_roster`` 为假时跳过名单唯一性校验，供调用方（分页）在同样的
+    全快照查询上先行校验过的情况使用。
+    """
     queries = build_queries(scope)
-    await _assert_unique_roster(
-        db, queries["roster_conflicts"], stage="roster_conflicts"
-    )
+    if assert_roster:
+        await _assert_unique_roster(
+            db, queries["roster_conflicts"], stage="roster_conflicts"
+        )
     facts = {
         name: query
         for name, query in queries.items()
@@ -341,7 +353,9 @@ async def query_core(
         db, "permissions", permission_query
     )
     with _report_stage("assemble") as details:
-        rows = assemble(results, scope.group_by, scope.skill_detail)
+        rows = assemble(
+            results, scope.group_by, scope.skill_detail, scope.task_type
+        )
         details["rows"] = len(rows)
         return rows
 
@@ -400,7 +414,13 @@ async def query_page(
             (row["group_user"], row["skill_id"]) for row in page_keys
         ),
     )
-    return await query_core(db, scoped_page, concurrency=concurrency), total
+    # 名单唯一性校验与 page_roster_conflicts 是同一条全快照查询，不再重复执行。
+    return (
+        await query_core(
+            db, scoped_page, concurrency=concurrency, assert_roster=False
+        ),
+        total,
+    )
 
 
 async def _resolve_snapshot(db, params: TaskTypeReportParams) -> str | None:
@@ -449,6 +469,7 @@ def _build_scope(
         start=start,
         stop=stop,
         group_by=params.group_by,
+        task_type=params.task_type,
         skill_detail=params.skill_detail,
         user_id=params.user_id,
         keyword=params.keyword,

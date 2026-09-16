@@ -219,7 +219,9 @@ async def task_type_report(
 
 2026-09-16 更新：线上反馈报表查询超时后，已按上一段预留的方式把 8 条事实查询改为受限并发（默认 4，`REPORT_QUERY_CONCURRENCY`，设为 1 即退回串行），`roster_conflicts`、`permissions` 与分页阶段仍串行；查询条数与口径不变。同批把纯行组装拆到 `task_type_report_rows.py`，并在 `stage=get_report` 日志上增加 `stages` / `slowest` / `slowest_ms` 汇总字段。EXPLAIN、索引与压测仍未在目标 TDSQL 完成，排查入口见 [analysis/playbook/task-type-report-build-queries.md](../../../../analysis/playbook/task-type-report-build-queries.md)。
 
-同日补充：分页键查询改为先在事实里对 `(人员, 技能)` 去重、再做名单过滤与机构映射，`page_count` 与 `page_keys` 由 `asyncio.gather` 并发取回（分页阶段自此不再全部串行），指标 SQL 与统计口径不变；本模块执行的每条查询另输出一行 `task_type_report_sql`（含 `sql` 与 `params`）便于逐指标核对口径。分页的数据库侧收益仍以目标 TDSQL 的 EXPLAIN 与实测为准。
+同日补充：分页键查询改为先在事实里对 `(人员, 技能)` 去重、再做名单过滤与机构映射，`page_count` 与 `page_keys` 由 `asyncio.gather` 并发取回（分页阶段自此不再全部串行），指标 SQL 与统计口径不变；本模块执行的每条查询另输出一行 `task_type_report_sql`（含 `sql` 与 `params`）便于逐指标核对口径。
+
+同日二补（单类型收窄）：指定 `task_type` 时只执行该类型涉及的查询（`push_plan` 5 条、`ask_plan` 4 条、`push_other` 3 条，外加 `permissions` 与名单校验），推送类与点击类 SQL 增加 `AND task_type = :task_type` 不再聚合另一半，分页键与结果维度骨架同样按该类型收窄；分页请求里重复的 `roster_conflicts` 已去掉。副作用是「只有其它类型事实的经理不再出现在该类型报表及其分页 total 中」，口径已同步到 DESIGN.md。分页的数据库侧收益仍以目标 TDSQL 的 EXPLAIN 与实测为准。
 
 同一名单派生表在多条 SQL 中出现并不意味着被数据库缓存或只计算一次；优化器可能合并或物化派生表。腾讯文档说明 TDSQL 支持跨节点 JOIN/子查询，但相同 shardkey 的关联有更好的本地性。**因此，当前 SQL 是正确性基线，不能仅凭 MySQL 兼容就承诺 TDSQL 性能。** 依据：[TDSQL 开发概览](https://www.tencentcloud.com/document/product/1042/38142)、[MySQL 派生表优化](https://dev.mysql.com/doc/refman/8.0/en/derived-table-optimization.html)。
 

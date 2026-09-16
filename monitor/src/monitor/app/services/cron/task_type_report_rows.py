@@ -64,10 +64,17 @@ def percentage(numerator: int | None, denominator: int | None) -> float | None:
 
 
 def assemble(
-    results: dict[str, list[dict]], group_by: str, skill_detail: bool = False
+    results: dict[str, list[dict]],
+    group_by: str,
+    skill_detail: bool = False,
+    task_type: str | None = None,
 ) -> list[dict]:
-    """只合并数据库聚合结果；绝不累加分组后的 DISTINCT 计数生成总行。"""
-    base_rows = _base_rows(results, group_by)
+    """只合并数据库聚合结果；绝不累加分组后的 DISTINCT 计数生成总行。
+
+    ``task_type`` 指定时只组装该类型，用于单类型请求按需生成行。
+    """
+    types = (task_type,) if task_type else TASK_TYPES
+    base_rows = _base_rows(results, group_by, types)
     # 技能明细只展开事实里出现过的维度×技能，不做名单×技能笛卡尔积。
     rows = {} if skill_detail else base_rows
     for name, records in results.items():
@@ -78,7 +85,7 @@ def assemble(
             if key not in base_rows:
                 raise ValueError("roster changed during report query")
             if skill_detail:
-                key = _expand_skill_rows(rows, base_rows, key, record)
+                key = _expand_skill_rows(rows, base_rows, key, record, types)
             _merge_counts(rows[key], record)
     return [
         _finish_row(rows[key])
@@ -95,7 +102,7 @@ def _dimension_key(record: dict) -> tuple:
     )
 
 
-def _base_rows(results: dict, group_by: str) -> dict:
+def _base_rows(results: dict, group_by: str, task_types: tuple) -> dict:
     """只保留有事实的维度，并为每个维度补齐三类任务。"""
     facts = {
         _dimension_key(record)
@@ -108,20 +115,22 @@ def _base_rows(results: dict, group_by: str) -> dict:
         for record in results["permissions"]
         if _dimension_key(record) in facts
     ]
-    return _empty_rows(dimensions, group_by)
+    return _empty_rows(dimensions, group_by, task_types)
 
 
-def _empty_rows(dimensions: list[dict], group_by: str) -> dict:
+def _empty_rows(
+    dimensions: list[dict], group_by: str, task_types: tuple
+) -> dict:
     """为传入的有效维度补齐三类任务，未参与分组的列留空。"""
     rows = {}
     for dimension in dimensions:
         user_id = dimension.get("group_user", "")
-        for task_type in TASK_TYPES:
+        for current_type in task_types:
             key = (
                 dimension["group_bbk"],
                 dimension["group_org"],
                 user_id,
-                task_type,
+                current_type,
             )
             row = {field: 0 for field in COUNTS}
             row.update(
@@ -143,8 +152,8 @@ def _empty_rows(dimensions: list[dict], group_by: str) -> dict:
                 pst_lvl=dimension.get("pst_lvl"),
                 skill_id=None,
                 cn_name=None,
-                task_type=task_type,
-                task_type_name=LABELS[task_type],
+                task_type=current_type,
+                task_type_name=LABELS[current_type],
                 permission_manager_count=int(
                     dimension["permission_manager_count"]
                 ),
@@ -170,11 +179,11 @@ def _finish_row(row: dict) -> dict:
 
 
 def _expand_skill_rows(
-    rows: dict, base_rows: dict, key: tuple, record: dict
+    rows: dict, base_rows: dict, key: tuple, record: dict, task_types: tuple
 ) -> tuple:
     """只展开有事实关联的人员/机构与技能组合，不做名单×技能笛卡尔积。"""
-    for task_type in TASK_TYPES:
-        base_key = (*key[:3], task_type)
+    for current_type in task_types:
+        base_key = (*key[:3], current_type)
         skill_key = (*base_key, record["skill_id"])
         if skill_key not in rows:
             rows[skill_key] = {

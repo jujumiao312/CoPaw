@@ -19,6 +19,28 @@
 
 当前口径：名单限定事实范围并提供元数据、权限人数；结果维度来自各指标的期间事实并集。普通经理分页与技能分页都使用推送执行、owner 活跃、Span、点击四条事实路径的 UNION。每个有效维度仍补三类任务，不能用全零指标判断是否有事实。
 
+2026-09-16 单类型收窄（方案 B）：指定 `task_type` 时只构造并执行该类型涉及的查询，维度骨架也只取该类型的事实路径，不再「算完全类型再丢弃」。
+
+| `task_type` | 执行的事实查询 | 分页键使用的路径 |
+| --- | --- | --- |
+| `push_plan` | `push_tasks`、`active`、`push_skills`、`push_customers`、`clicks` | 推送执行 / owner 活跃 / 推送点击 |
+| `ask_plan` | `ask_tasks`、`ask_skills`、`ask_customers`、`clicks` | Span / 主动点击 |
+| `push_other` | `push_tasks`、`active`、`push_skills` | 推送执行 / owner 活跃 |
+| 不传 | 8 条全跑（原行为） | 四条路径并集 |
+
+推送类与点击类 SQL 同时加 `AND task_type = :task_type`，不再聚合另一半类型；`permissions`、名单校验、各指标取值口径不变。副作用：只做主动提问的经理不再出现在 `task_type=push_plan` 的列表与 `total` 里（反之亦然），这是本方案的预期口径，见 DESIGN.md 同日修正。分页请求里重复执行的 `roster_conflicts` 已去掉，只剩 `page_roster_conflicts` 一次全快照校验。
+
+本地 SQLite 样本（400 名经理、推送执行按 2:1 混有子任务与无子任务、每个经理另有主动提问事实，键查询与 8 条指标合计）：
+
+| 请求 | 事实查询数 | 合计耗时 | 说明 |
+| --- | --- | --- | --- |
+| 不传 `task_type` | 8 | 约 730ms | 原行为 |
+| `push_plan` | 5 | 约 750ms | 省掉 3 条 ask 查询，但 `p.task_type`/`c.task_type` 谓词在 SQLite 里让推送与点击各慢一点，整体持平 |
+| `ask_plan` | 4 | 约 155ms | 不再扫推送侧 |
+| `push_other` | 3 | 约 130ms | 只扫推送执行/owner/技能 |
+
+该样本只说明"单类型不再跑无关查询"，SQLite 的执行计划不能代表 TDSQL。若线上 `task_type=push_plan` 的分页仍然慢，下一步是把类型条件下沉到 `push` 派生表内部（`push_plan` 用 `has_sub`、`push_other` 用成功且无子任务），减少进入 UNION 与聚合前的行数；这需要先用 EXPLAIN 确认收益，不能只凭本地样本改。
+
 服务以 INFO 级别记录 `task_type_report_timing`，保持 `MONITOR_LOG_LEVEL=info` 即可。筛选同一个 `report_id` 后比较 `elapsed_ms`：
 
 - `get_report`：方法总耗时，包含响应模型构造，不含路由 JSON 序列化、XLSX 文件生成和网络传输；它包含其他阶段，不能与子阶段相加。该行额外带 `stages`、`slowest`、`slowest_ms`，即本次请求记录了多少阶段、除总耗时外最慢的子阶段是谁；`rows` 为最终返回行数。先看这一行，再决定是否展开逐阶段日志。
@@ -29,7 +51,7 @@
 
 `status=ok` 表示正常结束；异常记录异常类型并原样抛出；路由超时取消会记录 `CancelledError`。并发请求用独立 `report_id`，多实例部署同时保留容器/实例日志标签。
 
-正常的非分页请求固定是 11 条查询、15 个阶段（含 `get_report` 自身）；命中名称解析会多 `validate_resolved_scope` / `scope_check` / `resolve_filter`（18 个阶段）；经理分页请求另有 `page_roster_conflicts` / `page_count` / `page_keys` 三个阶段（18 个阶段）。阶段数与预期不符时先确认命中的是哪条分支，再查改动。
+不传 `task_type` 的非分页请求固定是 11 条查询、15 个阶段（含 `get_report` 自身）；命中名称解析会多 `validate_resolved_scope` / `scope_check` / `resolve_filter`（18 个阶段）；经理分页请求另有 `page_roster_conflicts` / `page_count` / `page_keys` 三个阶段。指定 `task_type` 后事实查询只剩 3～5 条，阶段数相应减少，数量取决于类型而不是机构数。
 
 ### SQL 排查日志（2026-09-16）
 
@@ -173,4 +195,4 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
 
 Linux 使用 `venv/bin/python -m pytest ...`。
 
-`test_task_type_report_queries.py` 覆盖指标与去重、三种分组、筛选绑定与空结果、机构冲突先于筛选、点击人与任务 owner 使用独立名单、主动查看等于成功数且不依赖埋点、删除 job 的历史保留、反连接使用全部执行历史、overall 不等于分行相加，以及比例计算与参数绑定。并发与日志是独立契约测试：`test_fact_queries_run_concurrently_with_stable_results` 锁定"并发不改变查询条数与结果、在飞查询数受 `REPORT_QUERY_CONCURRENCY` 限制"，`test_timing_log_names_slowest_stage` 锁定"只有最外层阶段带 `stages` / `slowest` 汇总字段，且阶段数与该 `report_id` 的日志行数一致"，`test_sql_log_prints_every_metric_query` 锁定"模块内每条查询都打印 `sql` / `params`，快照查询不打印"，`test_page_keys_dedupe_facts_before_roster_mapping` 与 `test_page_total_and_keys_run_concurrently` 锁定分页键的去重顺序和并发取回。
+`test_task_type_report_queries.py` 覆盖指标与去重、三种分组、筛选绑定与空结果、机构冲突先于筛选、点击人与任务 owner 使用独立名单、主动查看等于成功数且不依赖埋点、删除 job 的历史保留、反连接使用全部执行历史、overall 不等于分行相加，以及比例计算与参数绑定。并发与日志是独立契约测试：`test_fact_queries_run_concurrently_with_stable_results` 锁定"并发不改变查询条数与结果、在飞查询数受 `REPORT_QUERY_CONCURRENCY` 限制"，`test_timing_log_names_slowest_stage` 锁定"只有最外层阶段带 `stages` / `slowest` 汇总字段，且阶段数与该 `report_id` 的日志行数一致"，`test_sql_log_prints_every_metric_query` 锁定"模块内每条查询都打印 `sql` / `params`，快照查询不打印"，`test_page_keys_dedupe_facts_before_roster_mapping` 与 `test_page_total_and_keys_run_concurrently` 锁定分页键的去重顺序和并发取回。单类型收窄由 `test_single_task_type_builds_only_related_queries` 与 `test_page_keys_follow_requested_task_type`（SQL 层）、`test_single_task_type_returns_only_matching_managers`、`test_single_task_type_excludes_unrelated_metric_sql`、`test_page_total_counts_only_requested_task_type`、`test_page_path_checks_roster_once`（服务与 HTTP 层）共同锁定。

@@ -7,6 +7,19 @@ from datetime import date, datetime, timedelta
 
 # 不参与指标合并的辅助查询：名单冲突校验与权限元数据。
 META_QUERY_NAMES = ("roster_conflicts", "permissions")
+# 单一任务类型只与这些查询有关；其余查询对它的数值和维度都没有贡献。
+TASK_TYPES = ("push_plan", "ask_plan", "push_other")
+TASK_TYPE_QUERY_NAMES = {
+    "push_plan": (
+        "push_tasks",
+        "active",
+        "push_skills",
+        "push_customers",
+        "clicks",
+    ),
+    "ask_plan": ("ask_tasks", "ask_skills", "ask_customers", "clicks"),
+    "push_other": ("push_tasks", "active", "push_skills"),
+}
 
 
 @dataclass(frozen=True)
@@ -16,6 +29,7 @@ class Scope:
     start: datetime
     stop: datetime
     group_by: str = "overall"
+    task_type: str | None = None
     first_bbk_id: str | None = None
     org_id: str | None = None
     skill_detail: bool = False
@@ -29,6 +43,8 @@ class Scope:
         date.fromisoformat(self.sync_date)
         if self.group_by not in ("overall", "branch", "org", "manager"):
             raise ValueError("invalid group_by")
+        if self.task_type is not None and self.task_type not in TASK_TYPES:
+            raise ValueError("invalid task_type")
         if self.skill_detail and self.group_by == "overall":
             raise ValueError("skill detail requires branch, org or manager")
         if self.start.tzinfo is not None or self.stop.tzinfo is not None:
@@ -126,7 +142,11 @@ def _permission_dimensions(scope: Scope, keys, values: dict) -> str:
 def build_queries(
     scope: Scope, keys_only: bool = False, permission_keys: tuple | None = None
 ) -> dict[str, tuple[str, tuple]]:
-    """一次构造所有分组查询；查询数与机构数无关。"""
+    """一次构造所需的分组查询；查询数与机构数无关。
+
+    未指定 ``scope.task_type`` 时返回全部 10 条查询；指定时只返回该类型
+    涉及的 3～5 条事实查询加辅助查询，并在 SQL 内按类型收窄。
+    """
     roster_filter, jkh_filter, page_skill_filter, values = _roster_scope_sql(
         scope
     )
@@ -180,6 +200,18 @@ def build_queries(
         if not scope.skill_detail:
             return ""
         return page_skill_filter.format(user_column=user_column)
+
+    # 单类型请求让 SQL 只聚合该类型，不再算完另一半再丢弃。
+    push_type_filter = (
+        "AND p.task_type = :task_type"
+        if scope.task_type is not None
+        else ""
+    )
+    click_type_where = (
+        "WHERE c.task_type = :task_type"
+        if scope.task_type is not None
+        else ""
+    )
 
     skill_dims, skill_groups = "", ""
     push_skill_join, ask_skill_join, click_skill_join = "", "", ""
@@ -253,6 +285,7 @@ def build_queries(
         FROM ({push}) p
         {push_skill_join}{skill_page_filter("p.user_id")}
         WHERE {jkh_exists("p.user_id")}
+        {push_type_filter}
         GROUP BY {groups}{skill_groups}, p.task_type"""
     query[
         "ask_tasks"
@@ -269,6 +302,7 @@ def build_queries(
         {push_skill_join}{skill_page_filter("p.job_user_id")}
         WHERE p.job_status = 'active' AND p.deleted_at IS NULL
         AND {jkh_exists("p.job_user_id")}
+        {push_type_filter}
         GROUP BY {groups}{skill_groups}, p.task_type"""
     query[
         "push_skills"
@@ -280,6 +314,7 @@ def build_queries(
         WHERE k.include_in_statistics = 1 AND k.skill_id <> '' {skill_match}
             AND p.deleted_at IS NULL AND p.job_status <> 'deleted'
             AND {jkh_exists("p.user_id")}
+        {push_type_filter}
         GROUP BY {groups}{skill_groups}, p.task_type"""
     query[
         "ask_skills"
@@ -345,19 +380,53 @@ def build_queries(
             if scope.skill_detail
             else ", NULL AS skill_id"
         )
-        keys_sql = f"""SELECT DISTINCT {metric_dims("pairs.group_user")}{key_skill}
-            FROM (
-                SELECT DISTINCT p.user_id AS group_user{pair_skill}
-                FROM ({push}) p {push_skill_join}
-                UNION SELECT DISTINCT p.job_user_id{pair_skill}
-                FROM ({push}) p {push_skill_join}
-                WHERE p.job_status = 'active' AND p.deleted_at IS NULL
-                UNION SELECT DISTINCT sp.user_id{pair_skill}
-                FROM ({ask}) sp {ask_skill_join}
-                UNION SELECT DISTINCT c.user_id{pair_skill}
-                FROM ({click_rows}) c {click_skill_join}
-            ) pairs
-            WHERE {jkh_exists("pairs.group_user")}"""
+
+        def push_key_branch(user_column: str, active_only: bool) -> str:
+            conditions = []
+            if active_only:
+                conditions.append(
+                    "p.job_status = 'active' AND p.deleted_at IS NULL"
+                )
+            if scope.task_type is not None:
+                conditions.append("p.task_type = :task_type")
+            where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+            return (
+                f"SELECT DISTINCT {user_column} AS group_user{pair_skill}\n"
+                f"                FROM ({push}) p {push_skill_join}{where}"
+            )
+
+        def click_key_branch() -> str:
+            where = (
+                " WHERE c.task_type = :task_type"
+                if scope.task_type is not None
+                else ""
+            )
+            return (
+                f"SELECT DISTINCT c.user_id AS group_user{pair_skill}\n"
+                f"                FROM ({click_rows}) c {click_skill_join}"
+                f"{where}"
+            )
+
+        # 单类型请求只保留该类型的事实路径：推送与主动提问互不从属，
+        # 推送内部再按 push_plan / push_other 收窄。
+        branches = []
+        if scope.task_type in (None, "push_plan", "push_other"):
+            branches.append(push_key_branch("p.user_id", active_only=False))
+            branches.append(push_key_branch("p.job_user_id", active_only=True))
+        if scope.task_type in (None, "ask_plan"):
+            branches.append(
+                f"SELECT DISTINCT sp.user_id AS group_user{pair_skill}\n"
+                f"                FROM ({ask}) sp {ask_skill_join}"
+            )
+        if scope.task_type != "push_other":
+            branches.append(click_key_branch())
+        keys_sql = (
+            f"SELECT DISTINCT {metric_dims('pairs.group_user')}{key_skill}\n"
+            "            FROM (\n                "
+            + "\n                UNION ".join(branches)
+            + "\n            ) pairs\n"
+            f"            WHERE {jkh_exists('pairs.group_user')}"
+        )
         return {"keys": bind(keys_sql, values)}
     query["clicks"] = f"""SELECT {metric_dims("c.user_id")}{skill_dims}, c.task_type,
         COUNT(DISTINCT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub'
@@ -372,5 +441,10 @@ def build_queries(
             THEN 1 END) AS phone_count
         FROM ({click_rows}) c
         {click_skill_join}{skill_page_filter("c.user_id")}
+        {click_type_where}
         GROUP BY {groups}{skill_groups}, c.task_type"""
+    if scope.task_type is not None:
+        # 单类型请求只保留该类型涉及的查询，避免算完再丢弃。
+        wanted = set(META_QUERY_NAMES + TASK_TYPE_QUERY_NAMES[scope.task_type])
+        query = {name: sql for name, sql in query.items() if name in wanted}
     return {name: bind(sql, values) for name, sql in query.items()}

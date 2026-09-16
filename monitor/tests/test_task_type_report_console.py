@@ -57,6 +57,24 @@ def paged_db(dimension_db):
         dimension_db.execute(
             "INSERT INTO swe_cron_subtasks VALUES (?,?)", (user, user)
         )
+        for skill in ("k1", "k2"):
+            ask_trace = f"{user}-ask-{skill}"
+            dimension_db.execute(
+                "INSERT INTO swe_tracing_spans (span_id, trace_id, source_id, "
+                "skill_id, user_id, start_time) VALUES (?,?,?,?,?,?)",
+                (
+                    f"{user}-{skill}",
+                    ask_trace,
+                    "S",
+                    skill,
+                    user,
+                    "2026-09-13 09:00:00",
+                ),
+            )
+            dimension_db.execute(
+                "INSERT INTO swe_cron_subtasks VALUES (?,?)",
+                (ask_trace, f"A{skill}"),
+            )
     return dimension_db
 
 
@@ -197,8 +215,7 @@ async def test_pages_match_full_filtered_report(paged_db, service_db, detail):
     assert any("user_id IN" in sql for sql in metric_sql)
     if detail:
         assert any(
-            "p.user_id = %s AND kd.skill_id = %s" in sql
-            for sql in metric_sql
+            "p.user_id = %s AND kd.skill_id = %s" in sql for sql in metric_sql
         )
 
 
@@ -354,11 +371,146 @@ async def test_page_boundary_splits_one_manager_skills(paged_db, service_db):
     )
     assert first["items"][0]["skill_id"] == "k1"
     assert second["items"][0]["skill_id"] == "k2"
+    # 方案 B：只返回该类型真有事实的经理，行的值来自该类型自己的事实。
     assert all(
-        item["suc_execute_job"] == item["read_tasks"] == 0
+        item["suc_execute_job"] == item["read_tasks"] == 1
         and item["active_manager_count"] is None
         for item in first["items"] + second["items"]
     )
+
+
+# 每条指标 SQL 的唯一标记，用于核对单类型请求实际执行了哪些查询。
+AUDIT_MARKERS = {
+    "push_tasks": ("SUM(CASE WHEN p.status",),
+    "ask_tasks": ("COUNT(DISTINCT sp.trace_id) AS suc_execute_job",),
+    "active": ("AS active_manager_count",),
+    "push_skills": ("AS skill_count", "FROM (SELECT e.id"),
+    "ask_skills": ("AS skill_count", "FROM (SELECT sp.trace_id"),
+    "push_customers": (
+        "COUNT(DISTINCT s.custuid)",
+        "p.task_type = 'push_plan'",
+    ),
+    "ask_customers": (
+        "COUNT(DISTINCT s.custuid)",
+        "'ask_plan' AS task_type",
+    ),
+    "clicks": ("AS insight_count",),
+}
+
+
+@pytest.fixture
+def task_type_db(dimension_db):
+    """一个只做主动提问的经理，用于验证单类型维度收窄。"""
+    dimension_db.execute(
+        "INSERT INTO jkh_user_inf VALUES ('askonly','2026-09-13','001','01',"
+        "'甲分行','同名支行','只问经理','L2')"
+    )
+    dimension_db.execute(
+        "INSERT INTO swe_tenant_init_source VALUES ('askonly','S')"
+    )
+    dimension_db.execute(
+        "INSERT INTO swe_tracing_spans (span_id, trace_id, source_id, skill_id, "
+        "user_id, start_time) VALUES ('askonly-1','askonly-t','S','k1',"
+        "'askonly','2026-09-13 09:00:00')"
+    )
+    dimension_db.execute(
+        "INSERT INTO swe_cron_subtasks VALUES ('askonly-t','C9')"
+    )
+    return dimension_db
+
+
+@pytest.mark.asyncio
+async def test_single_task_type_returns_only_matching_managers(
+    task_type_db, service_db
+):
+    """方案 B：只有主动提问事实的经理不进入推送报表，反之亦然。"""
+    base = {**DATES, "group_by": "manager"}
+    push = (await fetch({**base, "task_type": "push_plan"}, "001")).json()
+    ask = (await fetch({**base, "task_type": "ask_plan"}, "001")).json()
+    assert {row["user_id"] for row in push["items"]} == {"alice"}
+    assert {row["user_id"] for row in ask["items"]} == {"alice", "askonly"}
+    # 不传 task_type 时仍是全类型并集，行为不变。
+    full = (await fetch(base, "001")).json()
+    assert {row["user_id"] for row in full["items"]} == {"alice", "askonly"}
+    assert {row["task_type"] for row in full["items"]} == {
+        "push_plan",
+        "ask_plan",
+        "push_other",
+    }
+    assert all(row["task_type"] == "push_plan" for row in push["items"])
+
+
+@pytest.mark.asyncio
+async def test_single_task_type_excludes_unrelated_metric_sql(
+    task_type_db, service_db
+):
+    """方案 B：单类型请求不再执行与该类型无关的指标 SQL。"""
+    cases = {
+        "push_plan": {
+            "push_tasks",
+            "active",
+            "push_skills",
+            "push_customers",
+            "clicks",
+        },
+        "ask_plan": {"ask_tasks", "ask_skills", "ask_customers", "clicks"},
+        "push_other": {"push_tasks", "active", "push_skills"},
+    }
+    for task_type, expected in cases.items():
+        for paging in ({}, {"page": 1, "page_size": 20}):
+            service_db.calls.clear()
+            response = await fetch(
+                {
+                    **DATES,
+                    "group_by": "manager",
+                    "task_type": task_type,
+                    **paging,
+                },
+                "001",
+            )
+            assert response.status_code == 200, response.text
+            sqls = [sql for sql, _ in service_db.calls]
+            executed = {
+                name
+                for name, markers in AUDIT_MARKERS.items()
+                if any(
+                    all(marker in sql for marker in markers) for sql in sqls
+                )
+            }
+            assert executed == expected
+
+
+@pytest.mark.asyncio
+async def test_page_total_counts_only_requested_task_type(
+    task_type_db, service_db
+):
+    """分页的 total 与取页同样只统计该类型的维度。"""
+    base = {**DATES, "group_by": "manager", "page": 1, "page_size": 20}
+    push = (await fetch({**base, "task_type": "push_plan"}, "001")).json()
+    ask = (await fetch({**base, "task_type": "ask_plan"}, "001")).json()
+    assert push["total"] == 1
+    assert {row["user_id"] for row in push["items"]} == {"alice"}
+    assert ask["total"] == 2
+    assert {row["user_id"] for row in ask["items"]} == {"alice", "askonly"}
+
+
+@pytest.mark.asyncio
+async def test_page_path_checks_roster_once(paged_db, service_db):
+    """分页只做一次全快照名单校验，不再重复同一条 SQL。"""
+    await fetch(
+        {
+            **DATES,
+            "group_by": "manager",
+            "task_type": "push_plan",
+            "page": 1,
+            "page_size": 20,
+        },
+        "001",
+    )
+    roster_calls = [
+        sql for sql, _ in service_db.calls if "HAVING COUNT(*) > 1" in sql
+    ]
+    assert len(roster_calls) == 1
 
 
 class PageKeyQueryDb(AsyncQueryDb):
