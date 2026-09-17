@@ -13,6 +13,7 @@ import {
   BarChartOutlined,
   ReloadOutlined,
   CloseOutlined,
+  ExclamationCircleOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import dayjs, { type Dayjs } from "dayjs";
@@ -67,6 +68,22 @@ const metricColumns: ColumnsType<ReportRow> = metrics.map(([key, title]) => ({
       ? `${value.toFixed(2)}%`
       : value.toLocaleString(),
 }));
+
+const FIELD_DEFINITION_URL = "https://doc.cmbchina.com/f/v?id=_4boSo1";
+const fieldDefinitionTip = (
+  <>
+    该看板数据按机构、客户经理与任务类型查看技能运行表现，字段口径详情请参考
+    <a
+      href={FIELD_DEFINITION_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={styles.tipLink}
+    >
+      {FIELD_DEFINITION_URL}
+    </a>{" "}
+    [Claw数据字段口径说明.pdf]。
+  </>
+);
 
 function entityKey(row: ReportRow, group: ReportGroup) {
   return JSON.stringify([
@@ -401,9 +418,19 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
         <div className={styles.titleRow}>
           <BarChartOutlined aria-hidden />
           <h1>Claw 技能运行看板</h1>
+          <Tooltip
+            title={fieldDefinitionTip}
+            styles={{ root: { maxWidth: 360 } }}
+          >
+            <ExclamationCircleOutlined
+              className={styles.titleTip}
+              tabIndex={0}
+              role="img"
+              aria-label="字段口径说明"
+            />
+          </Tooltip>
           {isTaskReportDemo() && <Tag color="gold">模拟预览</Tag>}
         </div>
-        <p>按机构、客户经理与任务类型查看技能运行表现</p>
       </header>
       {isTaskReportDemo() && (
         <Alert
