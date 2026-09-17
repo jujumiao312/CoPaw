@@ -59,6 +59,14 @@
 
 边界按文件划分：只有 `task_type_report.py` 里编排的查询会打印，名单快照（`QueryService._resolve_jkh_sync_date`）等其它模块的 SQL 不在其中。`sql` 是编译后的文本（`%s` 占位，不含字面量），`params` 是绑定值元组，可能包含用户输入的关键字、机构号和经理 ID，属于敏感排查信息，只用于定位口径差异，不要转发或长期留存。SQL 文本按原样打印，便于直接复制到 EXPLAIN；日志量大时按 `query=` 过滤，或把该 logger 级别调到 WARNING 关闭。
 
+技能明细请求（`skill_detail=true`）另有一行 `task_type_report_sql_sources`，按查询列出各自贡献的技能 ID（每条查询最多 30 个，超出以 `(+N)` 标注）：
+
+```
+task_type_report_sql_sources report_id=... by_query=push_tasks=k1,k2 active=k1,k2 push_skills=k1,k2 push_customers=k1,k2 clicks=k1,k2
+```
+
+排查"明细里多出某个技能"时先看这一行：技能只出现在 `clicks`/`active` 里说明它来自点击或 owner 活跃路径；出现在 `push_tasks`/`push_skills` 里则是该任务集合本身绑定。
+
 数据库调用的计时包含连接池等待、SQL 执行、传输和结果转换，不能直接等同于数据库执行时间。事实查询自 2026-09-16 起按 `REPORT_QUERY_CONCURRENCY`（默认 4）受限并发，可用 `TaskTypeReportService(concurrency=...)` 覆盖，设为 1 即退回全部串行；`roster_conflicts`、`permissions` 与 `page_roster_conflicts` 仍串行，`page_count` 与 `page_keys` 彼此并发。并发只压缩总耗时（从"各查询相加"变成"约等于最慢一批"），不改变查询条数和指标口径。多条查询同时取连接时，阶段耗时会把连接池排队时间算进去，判断数据库侧耗时要结合 EXPLAIN 与连接池指标；需要区分时把并发调回 1 复测即可。
 
 定位到慢查询名后，在相同 Scope 下取得实际参数化 SQL，通过现有连接执行普通 EXPLAIN：
@@ -93,7 +101,7 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
 
 - 查询条数与机构数、用户数无关，不存在按机构循环的 N+1。有事实时核心仍为 10 条查询，无事实时为 9 条；另外有快照、范围校验、名称解析以及分页键查询；总数随输入路径变化，不能统一宣称最多 13 条。
 - 业务值全部通过内部 `:name` 占位符传递，不进入 SQL 文本，由 `bind` 编译为驱动可识别的 `%s`。
-- 函数体为线性字符串拼接，无嵌套分支，圈复杂度低；无需为新增机构层级调整结构。
+- 2026-09-16 拆分：`build_queries` 只做编排，片段由模块级 helper 提供——`_skill_joins`（目录与三类技能关联）、`_click_skill_scope_join`（点击技能范围）、`_page_keys_sql`（分页维度键）、`_metric_dims` / `_roster_value` / `_jkh_exists`（维度列与名单校验）；`_SkillJoins` / `_QueryParts` 承载公共片段。拆分原因是新增点击范围逻辑后 `build_queries` 圈复杂度到 16，超过 flake8 `--max-complexity=15`；拆分后本模块最大圈复杂度为 8。新增查询或机构层级时按同样方式加片段，不要再把分支堆回 `build_queries`。
 
 ## 2. 入参与出口
 
@@ -142,14 +150,35 @@ plan = await db.fetch_all("EXPLAIN " + sql, values)
 
 4. **可复用的布尔谓词片段**
 
-   | 片段 | 作用 |
-   | --- | --- |
-   | `has_sub` | trace 是否存在子任务，决定 push 类型 |
-   | `stat_job` | job 的 `skill_ids` 是否含 `include_in_statistics=1` 的技能（`FIND_IN_SET`） |
-   | `stat_ask` | trace 的 span 是否命中统计内技能 |
-   | `click_push` / `click_ask` | 点击事件回溯归属为推送或主动提问的二次校验 |
+| 片段 | 作用 |
+| --- | --- |
+| `has_sub` | trace 是否存在子任务，决定 push 类型 |
+| `stat_job` | job 的 `skill_ids` 是否含 `include_in_statistics=1` 的技能（`FIND_IN_SET`） |
+| `stat_ask` | trace 的 span 是否命中统计内技能 |
+| `click_push` / `click_ask` | 点击事件回溯归属为推送或主动提问的二次校验 |
+| — | 无效技能行在装配阶段过滤，SQL 侧不加点击技能范围关联（见下节） |
 
    这些片段被内联到多条 f-string 中，属于复用性与可读性的取舍；修改时必须同时检查所有引用点。
+
+## 技能明细里的无效技能行（2026-09-16）
+
+现象：分行维度 + 推送(名单+方案) + 技能明细里，出现的技能比统计表 `skill_count` 多。原因是 `clicks` 的技能绑定只要求"点击关联 job 的 `skill_ids` 含该技能"，而点击按 `clicked_at` 取窗口、关联任务不限制 `actual_time`，于是窗口外生成的任务仅凭一次点击就把它的技能带进了明细；`assemble` 以事实并集建技能行，多出来的技能行就出现在明细里。
+
+处理方式（轻量、已定稿）：
+
+1. **装配阶段剔除**：`task_type_report_rows._drop_click_only_skills` 只保留「该维度对象+技能」至少有一个任务级事实（`push_tasks`/`active`/`push_skills`/`push_customers`/`ask_*`）的行，只有 `clicks` 事实的行整行丢掉；同一技能只要有任务事实，仍按原规则补齐三类任务。点击事件本身的计数条件不变，"本期查看往期方案"对本期确有该技能的任务仍然计入。该过滤纯 Python，不增加 SQL 成本。
+2. **分页键只取任务路径**：`_page_keys_sql` 在 `skill_detail=true` 时不再拼接点击分支，否则被剔除的键会留在 `total` 里，造成 total 与实际行数不一致。
+
+**不要再用 SQL 层解决这个问题。** 曾用过的两种写法都很贵或很脆：
+
+- 逐行相关子查询（`EXISTS` + 嵌套子查询 + `FIND_IN_SET`）：本机样本 `clicks` 从约 220ms 涨到 **4.4s**；
+- 物化范围派生表再等值 JOIN：约 270ms，但明细查询在生产仍易超时，且 `ON` 里引用了后面的表触发过 MySQL `Unknown column ... in 'on clause'`（`ON` 只能引用前面的表）。
+
+现状（本机样本，400 名经理窗口）：`clicks` 约 220～250ms，技能明细键查询约 53ms（不拼点击分支后比原先的约 200ms 更快）。
+
+核对方式：同一请求的统计表 `skill_count` 应等于技能明细行数；`test_skill_detail_matches_branch_skill_count`（HTTP 层）与 `test_assemble_drops_click_only_skill_rows`、`test_page_keys_skip_clicks_for_skill_detail`（SQL/装配层）锁定该行为。
+
+注意：单类型请求（`task_type` 指定）只跑该类型的查询，所以明细里的技能天然都带该类型的任务事实；不传 `task_type` 的全量报表仍按原规则对每个技能补齐三类任务，可能保留「只有其它类型事实」的零值技能行，这属于既有口径，不要据此再改过滤条件。
 
 ## 4. 10 条查询
 

@@ -10,6 +10,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from .task_type_report_sql import META_QUERY_NAMES
 
 TASK_TYPES = ("push_plan", "ask_plan", "push_other")
+# 点击只提供查看/点击事实，不能单独定义一个技能明细行。
+CLICK_QUERY = "clicks"
 LABELS = dict(
     zip(
         TASK_TYPES,
@@ -77,6 +79,7 @@ def assemble(
     base_rows = _base_rows(results, group_by, types)
     # 技能明细只展开事实里出现过的维度×技能，不做名单×技能笛卡尔积。
     rows = {} if skill_detail else base_rows
+    skill_sources: dict[tuple, set[str]] = {}
     for name, records in results.items():
         if name in META_QUERY_NAMES:
             continue
@@ -86,11 +89,35 @@ def assemble(
                 raise ValueError("roster changed during report query")
             if skill_detail:
                 key = _expand_skill_rows(rows, base_rows, key, record, types)
+                skill_key = (*key[:3], key[4])
+                skill_sources.setdefault(skill_key, set()).add(name)
             _merge_counts(rows[key], record)
+    if skill_detail:
+        rows = _drop_click_only_skills(rows, skill_sources)
     return [
         _finish_row(rows[key])
         for key in sorted(rows, key=_sort_key(skill_detail))
     ]
+
+
+def _drop_click_only_skills(
+    rows: dict, skill_sources: dict[tuple, set[str]]
+) -> dict:
+    """剔除只有点击事实的“维度对象+技能”行。
+
+    点击按点击时间取窗口、关联任务不限制生成时间，窗口外任务的技能会仅凭一次
+    点击出现在明细里，使明细技能数多于统计表技能总数。这些技能不属于当前筛选
+    的任务范围，装配阶段直接去掉，数据库侧不为此增加关联查询；同一技能只要在
+    该维度有任何任务级事实，仍按原规则补齐三类任务行。
+    """
+    return {
+        key: row
+        for key, row in rows.items()
+        if any(
+            name != CLICK_QUERY
+            for name in skill_sources.get((*key[:3], key[4]), ())
+        )
+    }
 
 
 def _dimension_key(record: dict) -> tuple:

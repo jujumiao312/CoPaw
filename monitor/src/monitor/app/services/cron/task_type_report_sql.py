@@ -139,6 +139,158 @@ def _permission_dimensions(scope: Scope, keys, values: dict) -> str:
     return " AND (" + " OR ".join(groups) + ")"
 
 
+@dataclass(frozen=True)
+class _SkillJoins:
+    """技能明细用到的目录与关联片段；未开启技能明细时全部为空串。"""
+
+    catalog: str = ""
+    dims: str = ""
+    groups: str = ""
+    match: str = ""
+    push_join: str = ""
+    ask_join: str = ""
+    click_join: str = ""
+
+
+@dataclass(frozen=True)
+class _QueryParts:
+    """各查询共用的 SQL 片段与绑定值。"""
+
+    values: dict
+    jkh_filter: str
+    push: str
+    ask: str
+    click_rows: str
+    skills: _SkillJoins
+
+
+def _jkh_exists(user_column: str, jkh_filter: str) -> str:
+    """名单成员资格校验；只收窄范围，不改变维度取值。"""
+    return f"""EXISTS (
+            SELECT 1 FROM jkh_user_inf jkh
+            WHERE jkh.user_id = {user_column} AND jkh.sync_date = :sync_date
+            AND jkh.user_id IS NOT NULL AND jkh.user_id <> '' {jkh_filter}
+        )"""
+
+
+def _roster_value(user_column: str, column: str) -> str:
+    """取名单快照里的机构或人员取值；MIN 保证重复名单行不放大指标。"""
+    return f"""(SELECT MIN(jkh.{column}) FROM jkh_user_inf jkh
+            WHERE jkh.user_id = {user_column} AND jkh.sync_date = :sync_date
+            AND jkh.user_id IS NOT NULL AND jkh.user_id <> '')"""
+
+
+def _metric_dims(scope: Scope, user_column: str) -> str:
+    """指标侧分组列；列名与 permissions 的维度列保持一致。"""
+    if scope.group_by == "overall":
+        metric_bbk, metric_org = "''", "''"
+    elif scope.group_by == "branch":
+        metric_bbk = _roster_value(user_column, "first_bbk_id")
+        metric_org = "''"
+    else:
+        metric_bbk = _roster_value(user_column, "first_bbk_id")
+        metric_org = _roster_value(user_column, "org_id")
+    result = f"{metric_bbk} AS group_bbk, {metric_org} AS group_org"
+    if scope.group_by == "manager":
+        result += f", {user_column} AS group_user"
+    return result
+
+
+def _skill_joins(scope: Scope) -> _SkillJoins:
+    """技能目录与三类事实的技能关联；目录按 source+skill 去重。"""
+    if not scope.skill_detail:
+        return _SkillJoins()
+    catalog = """SELECT source_id, skill_id,
+            MIN(NULLIF(cn_name, '')) AS cn_name FROM swe_marketplace_skills
+            WHERE source_id = :source_id AND include_in_statistics = 1
+            AND skill_id IS NOT NULL AND skill_id <> ''
+            GROUP BY source_id, skill_id"""
+    return _SkillJoins(
+        catalog=catalog,
+        dims=", kd.skill_id AS skill_id, MIN(kd.cn_name) AS cn_name",
+        groups=", kd.skill_id",
+        match=" AND k.skill_id = kd.skill_id",
+        push_join=f"""JOIN ({catalog}) kd ON kd.source_id = p.source_id
+            AND FIND_IN_SET(kd.skill_id, p.skill_ids)""",
+        ask_join=f"""JOIN ({catalog}) kd ON kd.source_id = sp.source_id
+            AND kd.skill_id = sp.skill_id""",
+        click_join=f"""JOIN ({catalog}) kd ON kd.source_id = c.source_id
+            AND ((c.task_type = 'push_plan' AND EXISTS (
+                SELECT 1 FROM swe_cron_jobs j WHERE j.id = c.cron_task_id
+                AND j.source_id = c.source_id AND FIND_IN_SET(kd.skill_id, j.skill_ids)
+            )) OR (c.task_type = 'ask_plan' AND EXISTS (
+                SELECT 1 FROM swe_tracing_spans sp
+                WHERE sp.source_id = c.source_id AND sp.trace_id = c.trace_id
+                AND sp.skill_id = kd.skill_id
+            )))""",
+    )
+
+
+def _page_keys_sql(scope: Scope, parts: _QueryParts) -> tuple[str, tuple]:
+    """分页维度键：先在事实里对（人员，技能）去重，再做名单过滤与机构映射。"""
+    pair_skill = (
+        ", kd.skill_id AS skill_id"
+        if scope.skill_detail
+        else ", NULL AS skill_id"
+    )
+    key_skill = (
+        ", pairs.skill_id AS skill_id"
+        if scope.skill_detail
+        else ", NULL AS skill_id"
+    )
+
+    def push_branch(user_column: str, active_only: bool) -> str:
+        conditions = []
+        if active_only:
+            conditions.append(
+                "p.job_status = 'active' AND p.deleted_at IS NULL"
+            )
+        if scope.task_type is not None:
+            conditions.append("p.task_type = :task_type")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        return (
+            f"SELECT DISTINCT {user_column} AS group_user{pair_skill}\n"
+            f"                FROM ({parts.push}) p "
+            f"{parts.skills.push_join}{where}"
+        )
+
+    def click_branch() -> str:
+        where = (
+            " WHERE c.task_type = :task_type"
+            if scope.task_type is not None
+            else ""
+        )
+        return (
+            f"SELECT DISTINCT c.user_id AS group_user{pair_skill}\n"
+            f"                FROM ({parts.click_rows}) c\n"
+            f"                {parts.skills.click_join}{where}"
+        )
+
+    # 单类型请求只保留该类型的事实路径：推送与主动提问互不从属，
+    # 推送内部再按 push_plan / push_other 收窄。
+    branches = []
+    if scope.task_type in (None, "push_plan", "push_other"):
+        branches.append(push_branch("p.user_id", active_only=False))
+        branches.append(push_branch("p.job_user_id", active_only=True))
+    if scope.task_type in (None, "ask_plan"):
+        branches.append(
+            f"SELECT DISTINCT sp.user_id AS group_user{pair_skill}\n"
+            f"                FROM ({parts.ask}) sp {parts.skills.ask_join}"
+        )
+    # 技能明细的维度键只取任务路径：点击路径可能带出本期没有任务的技能，
+    # 这些行会在装配阶段被剔除，留在键里会让 total 与实际行数不一致。
+    if scope.task_type != "push_other" and not scope.skill_detail:
+        branches.append(click_branch())
+    keys_sql = (
+        f"SELECT DISTINCT {_metric_dims(scope, 'pairs.group_user')}{key_skill}\n"
+        "            FROM (\n                "
+        + "\n                UNION ".join(branches)
+        + "\n            ) pairs\n"
+        f"            WHERE {_jkh_exists('pairs.group_user', parts.jkh_filter)}"
+    )
+    return bind(keys_sql, parts.values)
+
+
 def build_queries(
     scope: Scope, keys_only: bool = False, permission_keys: tuple | None = None
 ) -> dict[str, tuple[str, tuple]]:
@@ -169,33 +321,6 @@ def build_queries(
         dims += ", r.user_id AS group_user"
         groups += ", group_user"
 
-    def jkh_exists(user_column: str) -> str:
-        return f"""EXISTS (
-            SELECT 1 FROM jkh_user_inf jkh
-            WHERE jkh.user_id = {user_column} AND jkh.sync_date = :sync_date
-            AND jkh.user_id IS NOT NULL AND jkh.user_id <> '' {jkh_filter}
-        )"""
-
-    def roster_value(user_column: str, column: str) -> str:
-        return f"""(SELECT MIN(jkh.{column}) FROM jkh_user_inf jkh
-            WHERE jkh.user_id = {user_column} AND jkh.sync_date = :sync_date
-            AND jkh.user_id IS NOT NULL AND jkh.user_id <> '')"""
-
-    def metric_dims(user_column: str) -> str:
-        if scope.group_by == "overall":
-            metric_bbk, metric_org = "''", "''"
-        elif scope.group_by == "branch":
-            metric_bbk, metric_org = roster_value(
-                user_column, "first_bbk_id"
-            ), "''"
-        else:
-            metric_bbk = roster_value(user_column, "first_bbk_id")
-            metric_org = roster_value(user_column, "org_id")
-        result = f"{metric_bbk} AS group_bbk, {metric_org} AS group_org"
-        if scope.group_by == "manager":
-            result += f", {user_column} AS group_user"
-        return result
-
     def skill_page_filter(user_column: str) -> str:
         if not scope.skill_detail:
             return ""
@@ -203,42 +328,18 @@ def build_queries(
 
     # 单类型请求让 SQL 只聚合该类型，不再算完另一半再丢弃。
     push_type_filter = (
-        "AND p.task_type = :task_type"
-        if scope.task_type is not None
-        else ""
+        "AND p.task_type = :task_type" if scope.task_type is not None else ""
     )
     click_type_where = (
-        "WHERE c.task_type = :task_type"
-        if scope.task_type is not None
-        else ""
+        "WHERE c.task_type = :task_type" if scope.task_type is not None else ""
     )
 
-    skill_dims, skill_groups = "", ""
-    push_skill_join, ask_skill_join, click_skill_join = "", "", ""
-    skill_match = ""
-    if scope.skill_detail:
-        # One catalog row per source+skill, even when marketplace has revisions.
-        catalog = """SELECT source_id, skill_id,
-            MIN(NULLIF(cn_name, '')) AS cn_name FROM swe_marketplace_skills
-            WHERE source_id = :source_id AND include_in_statistics = 1
-            AND skill_id IS NOT NULL AND skill_id <> ''
-            GROUP BY source_id, skill_id"""
-        skill_dims = ", kd.skill_id AS skill_id, MIN(kd.cn_name) AS cn_name"
-        skill_groups = ", kd.skill_id"
-        skill_match = " AND k.skill_id = kd.skill_id"
-        push_skill_join = f"""JOIN ({catalog}) kd ON kd.source_id = p.source_id
-            AND FIND_IN_SET(kd.skill_id, p.skill_ids)"""
-        ask_skill_join = f"""JOIN ({catalog}) kd ON kd.source_id = sp.source_id
-            AND kd.skill_id = sp.skill_id"""
-        click_skill_join = f"""JOIN ({catalog}) kd ON kd.source_id = c.source_id
-            AND ((c.task_type = 'push_plan' AND EXISTS (
-                SELECT 1 FROM swe_cron_jobs j WHERE j.id = c.cron_task_id
-                AND j.source_id = c.source_id AND FIND_IN_SET(kd.skill_id, j.skill_ids)
-            )) OR (c.task_type = 'ask_plan' AND EXISTS (
-                SELECT 1 FROM swe_tracing_spans sp
-                WHERE sp.source_id = c.source_id AND sp.trace_id = c.trace_id
-                AND sp.skill_id = kd.skill_id
-            )))"""
+    skills = _skill_joins(scope)
+    skill_dims, skill_groups = skills.dims, skills.groups
+    skill_match = skills.match
+    push_skill_join = skills.push_join
+    ask_skill_join = skills.ask_join
+    click_skill_join = skills.click_join
     has_sub = "EXISTS (SELECT 1 FROM swe_cron_subtasks s WHERE s.trace_id = e.trace_id AND e.trace_id <> '')"
     # 推送侧事实的唯一来源：未删除且至少绑定一个统计技能的任务。
     push_job_scope = """j.deleted_at IS NULL AND j.status <> 'deleted'
@@ -287,70 +388,70 @@ def build_queries(
         WHERE r.sync_date = :sync_date AND r.user_id IS NOT NULL AND r.user_id <> ''
             {roster_filter} {permission_filter}
         GROUP BY {groups}"""
-    query["push_tasks"] = f"""SELECT {metric_dims("p.user_id")}{skill_dims}, p.task_type,
+    query["push_tasks"] = f"""SELECT {_metric_dims(scope, "p.user_id")}{skill_dims}, p.task_type,
         SUM(CASE WHEN p.status = 'success' AND p.async_status = 'success' THEN 1 ELSE 0 END) AS suc_execute_job,
         SUM(CASE WHEN p.is_read = 1 THEN 1 ELSE 0 END) AS read_tasks
         FROM ({push}) p
         {push_skill_join}{skill_page_filter("p.user_id")}
-        WHERE {jkh_exists("p.user_id")}
+        WHERE {_jkh_exists("p.user_id", jkh_filter)}
         {push_type_filter}
         GROUP BY {groups}{skill_groups}, p.task_type"""
     query[
         "ask_tasks"
-    ] = f"""SELECT {metric_dims("sp.user_id")}{skill_dims}, 'ask_plan' AS task_type,
+    ] = f"""SELECT {_metric_dims(scope, "sp.user_id")}{skill_dims}, 'ask_plan' AS task_type,
         COUNT(DISTINCT sp.trace_id) AS suc_execute_job,
         COUNT(DISTINCT sp.trace_id) AS read_tasks
         FROM ({ask}) sp
         {ask_skill_join}{skill_page_filter("sp.user_id")}
-        WHERE {jkh_exists("sp.user_id")}
+        WHERE {_jkh_exists("sp.user_id", jkh_filter)}
         GROUP BY {groups}{skill_groups}"""
-    query["active"] = f"""SELECT {metric_dims("p.job_user_id")}{skill_dims}, p.task_type,
+    query["active"] = f"""SELECT {_metric_dims(scope, "p.job_user_id")}{skill_dims}, p.task_type,
         COUNT(DISTINCT p.job_user_id) AS active_manager_count
         FROM ({push}) p
         {push_skill_join}{skill_page_filter("p.job_user_id")}
         WHERE p.job_status = 'active' AND p.deleted_at IS NULL
-        AND {jkh_exists("p.job_user_id")}
+        AND {_jkh_exists("p.job_user_id", jkh_filter)}
         {push_type_filter}
         GROUP BY {groups}{skill_groups}, p.task_type"""
     query[
         "push_skills"
-    ] = f"""SELECT {metric_dims("p.user_id")}{skill_dims}, p.task_type, COUNT(DISTINCT k.skill_id) AS skill_count
+    ] = f"""SELECT {_metric_dims(scope, "p.user_id")}{skill_dims}, p.task_type, COUNT(DISTINCT k.skill_id) AS skill_count
         FROM ({push}) p
         {push_skill_join}{skill_page_filter("p.user_id")}
         JOIN swe_marketplace_skills k ON k.source_id = p.source_id
             AND FIND_IN_SET(k.skill_id, p.skill_ids)
         WHERE k.include_in_statistics = 1 AND k.skill_id <> '' {skill_match}
             AND p.deleted_at IS NULL AND p.job_status <> 'deleted'
-            AND {jkh_exists("p.user_id")}
+            AND {_jkh_exists("p.user_id", jkh_filter)}
         {push_type_filter}
         GROUP BY {groups}{skill_groups}, p.task_type"""
     query[
         "ask_skills"
-    ] = f"""SELECT {metric_dims("sp.user_id")}{skill_dims}, 'ask_plan' AS task_type, COUNT(DISTINCT k.skill_id) AS skill_count
+    ] = f"""SELECT {_metric_dims(scope, "sp.user_id")}{skill_dims}, 'ask_plan' AS task_type, COUNT(DISTINCT k.skill_id) AS skill_count
         FROM ({ask}) sp
         {ask_skill_join}{skill_page_filter("sp.user_id")}
         JOIN swe_marketplace_skills k ON k.source_id = sp.source_id AND k.skill_id = sp.skill_id
         WHERE k.include_in_statistics = 1 AND k.skill_id <> '' {skill_match}
-        AND {jkh_exists("sp.user_id")} GROUP BY {groups}{skill_groups}"""
+        AND {_jkh_exists("sp.user_id", jkh_filter)} GROUP BY {groups}{skill_groups}"""
     query[
         "push_customers"
-    ] = f"""SELECT {metric_dims("p.user_id")}{skill_dims}, 'push_plan' AS task_type,
+    ] = f"""SELECT {_metric_dims(scope, "p.user_id")}{skill_dims}, 'push_plan' AS task_type,
         COUNT(DISTINCT s.custuid) AS recommended_customers
         FROM ({push}) p
         {push_skill_join}{skill_page_filter("p.user_id")}
         JOIN swe_cron_subtasks s ON s.trace_id = p.trace_id
         WHERE p.task_type = 'push_plan' AND s.custuid IS NOT NULL AND s.custuid <> ''
-        AND {stat_job} AND {jkh_exists("p.user_id")}
+        AND {stat_job} AND {_jkh_exists("p.user_id", jkh_filter)}
         GROUP BY {groups}{skill_groups}"""
     query[
         "ask_customers"
-    ] = f"""SELECT {metric_dims("sp.user_id")}{skill_dims}, 'ask_plan' AS task_type,
+    ] = f"""SELECT {_metric_dims(scope, "sp.user_id")}{skill_dims}, 'ask_plan' AS task_type,
         COUNT(DISTINCT s.custuid) AS recommended_customers
         FROM ({ask}) sp
         {ask_skill_join}{skill_page_filter("sp.user_id")}
         JOIN swe_cron_subtasks s ON s.trace_id = sp.trace_id
         WHERE s.custuid IS NOT NULL AND s.custuid <> ''
-        AND {jkh_exists("sp.user_id")} GROUP BY {groups}{skill_groups}"""
+        AND {_jkh_exists("sp.user_id", jkh_filter)} GROUP BY {groups}{skill_groups}"""
     # 点击必须从 clicked_at 缩小范围；关联任务不附加任务生成时间限制。
     click_push = """EXISTS (SELECT 1 FROM swe_cron_executions e
         JOIN swe_cron_jobs j ON j.id = e.job_id
@@ -374,69 +475,18 @@ def build_queries(
         AND ((c.event_type = 'preview_view' AND c.template_type = 'sub')
             OR (c.event_type = 'button_click' AND c.button_type IN ('insight', 'phone')))
         AND ({click_push} OR {click_ask})
-        AND {jkh_exists("c.user_id")}"""
+        AND {_jkh_exists("c.user_id", jkh_filter)}"""
+    parts = _QueryParts(
+        values=values,
+        jkh_filter=jkh_filter,
+        push=push,
+        ask=ask,
+        click_rows=click_rows,
+        skills=skills,
+    )
     if keys_only:
-        # 分页键只由（人员，技能）决定：先在事实里对二者去重，再做名单过滤和
-        # 机构映射，避免把逐行的机构子查询跑在整个事实窗口上。
-        pair_skill = (
-            ", kd.skill_id AS skill_id"
-            if scope.skill_detail
-            else ", NULL AS skill_id"
-        )
-        key_skill = (
-            ", pairs.skill_id AS skill_id"
-            if scope.skill_detail
-            else ", NULL AS skill_id"
-        )
-
-        def push_key_branch(user_column: str, active_only: bool) -> str:
-            conditions = []
-            if active_only:
-                conditions.append(
-                    "p.job_status = 'active' AND p.deleted_at IS NULL"
-                )
-            if scope.task_type is not None:
-                conditions.append("p.task_type = :task_type")
-            where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
-            return (
-                f"SELECT DISTINCT {user_column} AS group_user{pair_skill}\n"
-                f"                FROM ({push}) p {push_skill_join}{where}"
-            )
-
-        def click_key_branch() -> str:
-            where = (
-                " WHERE c.task_type = :task_type"
-                if scope.task_type is not None
-                else ""
-            )
-            return (
-                f"SELECT DISTINCT c.user_id AS group_user{pair_skill}\n"
-                f"                FROM ({click_rows}) c {click_skill_join}"
-                f"{where}"
-            )
-
-        # 单类型请求只保留该类型的事实路径：推送与主动提问互不从属，
-        # 推送内部再按 push_plan / push_other 收窄。
-        branches = []
-        if scope.task_type in (None, "push_plan", "push_other"):
-            branches.append(push_key_branch("p.user_id", active_only=False))
-            branches.append(push_key_branch("p.job_user_id", active_only=True))
-        if scope.task_type in (None, "ask_plan"):
-            branches.append(
-                f"SELECT DISTINCT sp.user_id AS group_user{pair_skill}\n"
-                f"                FROM ({ask}) sp {ask_skill_join}"
-            )
-        if scope.task_type != "push_other":
-            branches.append(click_key_branch())
-        keys_sql = (
-            f"SELECT DISTINCT {metric_dims('pairs.group_user')}{key_skill}\n"
-            "            FROM (\n                "
-            + "\n                UNION ".join(branches)
-            + "\n            ) pairs\n"
-            f"            WHERE {jkh_exists('pairs.group_user')}"
-        )
-        return {"keys": bind(keys_sql, values)}
-    query["clicks"] = f"""SELECT {metric_dims("c.user_id")}{skill_dims}, c.task_type,
+        return {"keys": _page_keys_sql(scope, parts)}
+    query["clicks"] = f"""SELECT {_metric_dims(scope, "c.user_id")}{skill_dims}, c.task_type,
         COUNT(DISTINCT CASE WHEN c.event_type = 'preview_view' AND c.template_type = 'sub'
             THEN c.customer_id END) AS read_customer_count,
         COUNT(DISTINCT CASE WHEN c.event_type = 'button_click' AND c.button_type = 'insight'

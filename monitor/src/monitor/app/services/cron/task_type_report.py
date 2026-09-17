@@ -53,6 +53,8 @@ ROSTER_AMBIGUOUS_MESSAGE = "名单快照中存在同一用户的多个机构归�
 SCOPE_FORBIDDEN_CODE = "report_scope_forbidden"
 # 互不依赖的事实查询并发上限；设为 1 即退回全部串行。
 REPORT_QUERY_CONCURRENCY = 4
+# 技能来源日志每条查询最多打印的技能 ID 数。
+SKILL_LOG_LIMIT = 30
 OPTION_COLUMNS = {
     "branches": ("first_bbk_id", "first_bbk_nm"),
     "orgs": ("org_id", "org_nm"),
@@ -161,6 +163,35 @@ def _log_report_sql(
         sql,
         tuple(values or ()),
     )
+
+
+def _log_skill_sources(results: dict) -> None:
+    """按查询打印技能明细来源，用于定位多出来的技能由哪条查询带进来。"""
+    if not logger.isEnabledFor(logging.INFO):
+        return
+    sources = []
+    for name, records in results.items():
+        if name in META_QUERY_NAMES:
+            continue
+        skills = sorted(
+            {row["skill_id"] for row in records if row.get("skill_id")}
+        )
+        if not skills:
+            continue
+        shown = ",".join(skills[:SKILL_LOG_LIMIT])
+        more = (
+            f"(+{len(skills) - SKILL_LOG_LIMIT})"
+            if len(skills) > SKILL_LOG_LIMIT
+            else ""
+        )
+        sources.append(f"{name}={shown}{more}")
+    if sources:
+        logger.info(
+            "%s_sources report_id=%s by_query=%s",
+            SQL_LOG_TAG,
+            _report_id.get(),
+            " ".join(sources),
+        )
 
 
 class ReportError(Exception):
@@ -352,6 +383,8 @@ async def query_core(
     results["permissions"] = await _fetch_report_query(
         db, "permissions", permission_query
     )
+    if scope.skill_detail:
+        _log_skill_sources(results)
     with _report_stage("assemble") as details:
         rows = assemble(
             results, scope.group_by, scope.skill_detail, scope.task_type

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """六种报表维度的真实 SQL 对账及经理元数据、技能展开边界。"""
 
+import logging
 from dataclasses import replace
 
 import httpx
@@ -17,6 +18,7 @@ from monitor.app.services.cron.task_type_report import (
     TaskTypeReportService,
     assemble,
 )
+from monitor.app.services.cron import task_type_report as report_service
 from monitor.app.services.cron.task_type_report_sql import build_queries
 
 
@@ -106,6 +108,7 @@ def test_six_combinations_execute_all_queries(
 
 
 def test_manager_counts_use_each_fact_actor(dimension_db, scope):
+    """执行按执行人、活跃按任务 owner、点击按点击人且限定在本期技能范围内。"""
     dimension_db.execute(
         "UPDATE swe_cron_jobs SET tenant_id = 'bob' WHERE id = 'j1'"
     )
@@ -133,6 +136,49 @@ def test_manager_counts_use_each_fact_actor(dimension_db, scope):
         assert bob["user_name"] == "李经理" and bob["pst_lvl"] == "L2"
         bob_ask = find_row(rows, "ask_plan", "bob", skill, "002")
         assert bob_ask["suc_execute_job"] == bob_ask["read_tasks"] == 1
+
+
+def test_assemble_drops_click_only_skill_rows(dimension_db, scope):
+    """只有点击事实的技能行不进入明细；补回任务事实即恢复。"""
+    scoped = replace(scope, group_by="branch", skill_detail=True)
+    results = execute(dimension_db, scoped)
+    clicks_only = {
+        name: value
+        for name, value in results.items()
+        if name in ("clicks", "permissions")
+    }
+    assert assemble(clicks_only, "branch", True) == []
+    assert {row["skill_id"] for row in assemble(results, "branch", True)} == {
+        "k1",
+        "k2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_skill_source_log_lists_contributing_queries(
+    dimension_db, service_db, caplog
+):
+    """技能明细排查：按查询列出各自贡献的技能 ID。"""
+    caplog.set_level(
+        logging.INFO, logger="monitor.app.services.cron.task_type_report"
+    )
+    await report_service.TaskTypeReportService().get_report(
+        request_params(
+            group_by="branch", task_type="push_plan", skill_detail=True
+        ),
+        "S",
+        "100",
+    )
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if f"{report_service.SQL_LOG_TAG}_sources report_id="
+        in record.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "push_tasks=k1,k2" in lines[0]
+    assert "clicks=k1,k2" in lines[0]
+    assert "ask_tasks" not in lines[0]
 
 
 def test_skills_are_distinct_by_id_not_name_and_source(dimension_db, scope):

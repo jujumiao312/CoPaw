@@ -223,6 +223,8 @@ async def task_type_report(
 
 同日二补（单类型收窄）：指定 `task_type` 时只执行该类型涉及的查询（`push_plan` 5 条、`ask_plan` 4 条、`push_other` 3 条，外加 `permissions` 与名单校验），推送类与点击类 SQL 增加 `AND task_type = :task_type` 不再聚合另一半，分页键与结果维度骨架同样按该类型收窄；分页请求里重复的 `roster_conflicts` 已去掉。副作用是「只有其它类型事实的经理不再出现在该类型报表及其分页 total 中」，口径已同步到 DESIGN.md。分页的数据库侧收益仍以目标 TDSQL 的 EXPLAIN 与实测为准。
 
+同日三补（技能明细的无效技能行）：测试环境发现分行维度 + 推送(名单+方案) + 技能明细会列出统计表技能总数之外的技能——点击按 `clicked_at` 取窗口且不限制关联任务时间，窗口外任务的技能仅凭点击进入了明细。先在 SQL 层加过点击技能范围（逐行 `EXISTS`，后改为物化范围派生表），但明细查询在生产极易超时，已退回 SQL 改动；现改为在装配阶段剔除只有点击事实的「维度对象+技能」行（`task_type_report_rows._drop_click_only_skills`），并在 `skill_detail=true` 时让分页维度键只取任务路径。点击事件本身的条件不变，`clicks` 回到约 220～250ms、技能明细键查询约 53ms（本机样本）。同时新增 `task_type_report_sql_sources` 日志，按查询列出各自贡献的技能 ID。行为由 `test_skill_detail_matches_branch_skill_count`、`test_assemble_drops_click_only_skill_rows`、`test_page_keys_skip_clicks_for_skill_detail` 锁定。
+
 同一名单派生表在多条 SQL 中出现并不意味着被数据库缓存或只计算一次；优化器可能合并或物化派生表。腾讯文档说明 TDSQL 支持跨节点 JOIN/子查询，但相同 shardkey 的关联有更好的本地性。**因此，当前 SQL 是正确性基线，不能仅凭 MySQL 兼容就承诺 TDSQL 性能。** 依据：[TDSQL 开发概览](https://www.tencentcloud.com/document/product/1042/38142)、[MySQL 派生表优化](https://dev.mysql.com/doc/refman/8.0/en/derived-table-optimization.html)。
 
 参考 SQL 不依赖 CTE、窗口函数或临时表，但相关 EXISTS、CASE 中的子查询和派生表仍需通过目标 TDSQL 代理验证。若计划显示 push 的分类 EXISTS 多次扫描、clicks 的 OR 导致劣化，可将点击查询拆成两条互斥类型聚合；指标口径和测试保持不变，不为少一条 SQL 承担无界扫描。

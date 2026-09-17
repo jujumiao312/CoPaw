@@ -198,6 +198,8 @@ COUNT(CASE
 
 推送点击：`c.trace_id=e.trace_id AND c.cron_task_id=j.id AND e.job_id=j.id AND c.source_id=j.source_id`，有子任务、job 未删除且有统计技能。主动点击：`c.source_id=sp.source_id AND c.trace_id=sp.trace_id`，满足主动分类并存在相同 source 下的统计 Span 技能，**不依赖 cron_task_id**。
 
+2026-09-16 修正（技能明细的无效技能行）：点击事件的归属与时间口径不变（点击人独立匹配名单、关联任务不加生成时间限制），因此窗口外生成的任务被本期查看时点击仍然计入。为避免这类点击把「本期没有任务的技能」带进技能明细、造成明细行数与统计表技能总数不一致，**在装配阶段剔除只有点击事实的「维度对象+技能」行**：同一维度该技能只要有任何任务级事实（执行、活跃、技能数、方案客户或主动 Span）就保留，并按原规则补齐三类任务，否则整行不出现在明细里。该过滤在 Python 侧完成，不增加数据库关联查询，避免技能明细查询超时；技能明细的分页维度键同样只取任务路径，保证 `total` 与实际行数一致。
+
 所有客户级点击过滤空 customer_id、空 trace_id。保持原事件口径，不额外要求 customer_id 必须出现在同 trace 的 subtasks.custuid；这类不一致作为数据质量核查，不通过静默 JOIN 隐藏。
 
 ## 7. 合并 SQL 的边界

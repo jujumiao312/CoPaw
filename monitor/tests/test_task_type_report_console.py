@@ -399,6 +399,49 @@ AUDIT_MARKERS = {
 
 
 @pytest.fixture
+def stale_click_db(dimension_db):
+    """窗口外生成、本期被查看的推送任务，且绑定了本期没用到的技能。"""
+    dimension_db.execute(
+        "INSERT INTO swe_marketplace_skills VALUES ('S','k3',1,'技能丙')"
+    )
+    dimension_db.execute(
+        "INSERT INTO swe_cron_jobs VALUES "
+        "('jx','alice','S','k1,k3','active',NULL)"
+    )
+    dimension_db.execute(
+        "INSERT INTO swe_cron_executions VALUES "
+        "(90,'jx','alice','px','2026-09-12 10:00:00','success','success',1)"
+    )
+    dimension_db.execute("INSERT INTO swe_cron_subtasks VALUES ('px','CX')")
+    dimension_db.execute(
+        "INSERT INTO swe_html_preview_click_events VALUES "
+        "('S','alice','jx','px','CX','2026-09-13 11:00:00','preview_view','sub',"
+        "NULL)"
+    )
+    return dimension_db
+
+
+@pytest.mark.asyncio
+async def test_skill_detail_matches_branch_skill_count(
+    stale_click_db, service_db
+):
+    """分行维度：技能明细列出的技能要正好落在统计表的技能总数范围内。"""
+    base = {**DATES, "group_by": "branch", "task_type": "push_plan"}
+    summary = (await fetch(base, "001")).json()
+    detail = (await fetch({**base, "skill_detail": "true"}, "001")).json()
+    branch = summary["items"][0]
+    assert branch["skill_count"] == 2
+    assert len(detail["items"]) == branch["skill_count"]
+    assert {row["skill_id"] for row in detail["items"]} == {"k1", "k2"}
+    # 窗口外任务的技能(k3)不进入明细；窗口内的点击仍按点击口径计入。
+    assert branch["read_customer_count"] == 2
+    k1 = next(row for row in detail["items"] if row["skill_id"] == "k1")
+    k2 = next(row for row in detail["items"] if row["skill_id"] == "k2")
+    assert k1["read_customer_count"] == 2
+    assert k2["read_customer_count"] == 1
+
+
+@pytest.fixture
 def task_type_db(dimension_db):
     """一个只做主动提问的经理，用于验证单类型维度收窄。"""
     dimension_db.execute(

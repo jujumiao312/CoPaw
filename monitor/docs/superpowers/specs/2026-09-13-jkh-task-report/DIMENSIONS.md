@@ -69,8 +69,8 @@ manager 模式 SQL 按 `(first_bbk_id, org_id, user_id, task_type)` 分组。由
 | --- | --- |
 | 推送执行、活跃、客户方案 | 当前 job.skill_ids 中绑定的每个统计技能（FIND_IN_SET） |
 | 主动任务、客户方案 | 满足原主动条件且时间窗口内 Span 的 skill_id，直接关联市场目录 |
-| 推送客户点击 | 点击关联 job 的绑定技能，继续验证原推送点击条件 |
-| 主动客户点击 | 点击 source+trace 对应 Span 的 skill_id；继续采用 clicked_at 时间窗，Span 不追加生成时间限制 |
+| 推送客户点击 | 点击关联 job 的绑定技能，继续验证原推送点击条件；本期该维度没有任务事实的技能行在装配阶段剔除（2026-09-16 修正） |
+| 主动客户点击 | 点击 source+trace 对应 Span 的 skill_id；继续采用 clicked_at 时间窗，Span 不追加生成时间限制；本期该维度没有任务事实的技能行同样在装配阶段剔除 |
 
 关键粒度：
 

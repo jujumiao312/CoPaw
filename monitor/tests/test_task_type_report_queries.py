@@ -431,6 +431,18 @@ def test_page_keys_follow_requested_task_type(
         assert "p.task_type = %s" in keys_sql
 
 
+def test_page_keys_skip_clicks_for_skill_detail(scope):
+    """技能明细的维度键只取任务路径，点击路径会在装配阶段被剔除。"""
+    paged = replace(scope, group_by="manager", task_type="push_plan")
+    summary_keys = build_queries(paged, keys_only=True)["keys"][0]
+    detail_keys = build_queries(
+        replace(paged, skill_detail=True), keys_only=True
+    )["keys"][0]
+    assert CLICK_TABLE in summary_keys
+    assert CLICK_TABLE not in detail_keys
+    assert PUSH_TABLE in detail_keys
+
+
 class AsyncQueryDb:
     """执行真实查询，保留调用记录以验证固定查询数和早退。"""
 
@@ -550,7 +562,7 @@ def sql_lines(caplog):
     return [
         record.getMessage()
         for record in caplog.records
-        if report_service.SQL_LOG_TAG in record.getMessage()
+        if f"{report_service.SQL_LOG_TAG} report_id=" in record.getMessage()
     ]
 
 
