@@ -290,9 +290,17 @@ async def test_full_xlsx_export(paged_db, service_db, detail):
         == "Content-Disposition"
     )
     workbook = load_workbook(BytesIO(result.content))
+    assert [ws.title for ws in workbook.worksheets] == [
+        "技能明细" if detail else "统计报表"
+    ]
     sheet = workbook.worksheets[0]
     assert sheet.max_row == full["total"] + 1
-    columns = [column[0] for column in export_module.COLUMNS]
+    columns = [
+        field
+        for field, _ in export_module.column_labels(
+            "manager", detail, "push_plan"
+        )
+    ]
     for source, cells in zip(full["items"], sheet.iter_rows(min_row=2)):
         for field, cell in zip(columns, cells):
             expected = source[field]
@@ -301,9 +309,6 @@ async def test_full_xlsx_export(paged_db, service_db, detail):
                 assert cell.number_format == "0.00%"
             else:
                 assert cell.value == expected
-    metadata = list(workbook.worksheets[1].values)
-    assert any("不可相加" in str(row) for row in metadata)
-    assert any(row == ("keyword", "分页") for row in metadata)
     workbook.close()
 
 
@@ -324,20 +329,22 @@ async def test_export_formula_safety_nulls_empty_and_limits(
     workbook = load_workbook(BytesIO(response.content))
     sheet = workbook.worksheets[0]
     assert sheet["F2"].value == "=1+1" and sheet["F2"].data_type == "s"
-    columns = [c[0] for c in export_module.COLUMNS]
-    assert (
-        sheet.cell(2, columns.index("recommended_customers") + 1).value is None
-    )
+    columns = [
+        field
+        for field, _ in export_module.column_labels(
+            "manager", False, "push_other"
+        )
+    ]
+    # 非名单推送不产出客户方案与点击指标，导出不保留这些恒空列。
+    assert not {
+        "recommended_customers",
+        "plan_read_rate",
+        "insight_customer_count",
+        "insight_count",
+        "phone_customer_count",
+        "phone_count",
+    } & set(columns)
     assert sheet.cell(2, columns.index("suc_execute_job") + 1).value == 1
-    assert sheet.cell(2, columns.index("insight_count") + 1).value is None
-    assert (
-        columns.index("insight_count")
-        == columns.index("click_to_insight_rate") + 1
-    )
-    assert (
-        columns.index("phone_count")
-        == columns.index("click_to_phone_rate") + 1
-    )
     workbook.close()
     for override in ({"task_type": None}, {"page": 1, "page_size": 20}):
         result = await fetch({**params, **override}, "001", "/export")
@@ -350,6 +357,121 @@ async def test_export_formula_safety_nulls_empty_and_limits(
     limited = await fetch(params, "001", "/export")
     assert limited.status_code == 413
     assert limited.json()["detail"]["code"] == "report_export_too_large"
+
+
+def export_header(response):
+    workbook = load_workbook(BytesIO(response.content))
+    try:
+        return [cell.value for cell in workbook.worksheets[0][1]]
+    finally:
+        workbook.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_type", ["push_plan", "ask_plan", "push_other"])
+@pytest.mark.parametrize("group_by", ["overall", "branch", "org", "manager"])
+async def test_export_columns_match_report(
+    dimension_db, service_db, group_by, task_type
+):
+    """导出表头与对应报表一致：维度决定标识列，任务类型决定指标列。"""
+    response = await fetch(
+        {**DATES, "group_by": group_by, "task_type": task_type},
+        "001",
+        "/export",
+    )
+    assert response.status_code == 200, response.text
+    assert export_header(response) == [
+        label
+        for _, label in export_module.column_labels(group_by, False, task_type)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "group_by,dimension_titles",
+    [
+        ("overall", []),
+        ("branch", ["分行号", "分行名称"]),
+        ("org", ["分行号", "分行名称", "网点号", "网点名称"]),
+        (
+            "manager",
+            [
+                "分行号",
+                "分行名称",
+                "网点号",
+                "网点名称",
+                "客户经理ID",
+                "客户经理姓名",
+                "SAP号",
+                "SAP岗位",
+            ],
+        ),
+    ],
+)
+async def test_export_omits_fields_outside_report(
+    dimension_db, service_db, group_by, dimension_titles
+):
+    """不在报表里的字段不导出：少维度不带多余标识列，非名单推送不带方案列。"""
+    header = export_header(
+        await fetch(
+            {**DATES, "group_by": group_by, "task_type": "push_other"},
+            "001",
+            "/export",
+        )
+    )
+    assert header[: len(dimension_titles)] == dimension_titles
+    for title in ("客户经理ID", "客户经理姓名", "SAP号", "SAP岗位"):
+        assert (title in header) is (title in dimension_titles)
+    assert "技能ID" not in header and "技能名称" not in header
+    for title in (
+        "方案客户数",
+        "已查看方案客户数",
+        "方案查看率（%）",
+        "洞察客户数",
+        "洞察覆盖率（%）",
+        "点击客户洞察总次数",
+        "电访客户数",
+        "电访覆盖率（%）",
+        "点击去电访总次数",
+    ):
+        assert title not in header
+    assert header[-5:] == [
+        "有权限客户经理数",
+        "活跃客户经理数",
+        "成功任务数",
+        "已查看任务数",
+        "任务查看率（%）",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_export_columns_follow_task_type_and_skill_detail(
+    dimension_db, service_db
+):
+    """主动提问没有活跃客户经理指标；技能明细才带技能名称列，且不单列技能ID。"""
+    ask = export_header(
+        await fetch(
+            {**DATES, "group_by": "branch", "task_type": "ask_plan"},
+            "001",
+            "/export",
+        )
+    )
+    assert "活跃客户经理数" not in ask
+    assert "成功任务数" in ask and "任务查看率（%）" in ask
+    detail = export_header(
+        await fetch(
+            {
+                **DATES,
+                "group_by": "branch",
+                "task_type": "push_plan",
+                "skill_detail": "true",
+            },
+            "001",
+            "/export",
+        )
+    )
+    assert detail[:3] == ["分行号", "分行名称", "技能名称"]
+    assert "技能ID" not in detail
 
 
 @pytest.mark.asyncio

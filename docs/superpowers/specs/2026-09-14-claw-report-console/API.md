@@ -52,7 +52,7 @@ UI：分行 Select + 支行 Select 联动构成级联筛选；切换分行清空
 
 响应：200，Content-Type=`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`，Content-Disposition 附件文件名 UTF-8。跨域部署暴露 Content-Disposition 头。
 
-表格包含对应组织/经理/SAP岗位/技能名称与ID、任务类型及原指标列；null 留空、0 保留、比例明确单位，保留“技能不可加总”等统计提示和筛选条件。字符串按 Excel 文本写入，不能解释为公式。复用现有后端 XLSX 工具，不接受前端生成 CSV 冒充 Excel。
+表格列与当前导出的报表一致：维度列按 group_by（分行/支行/客户经理）选取，技能明细才带技能名称，任务类型天然不产出的指标不导出；2026-09-17 起不再生成“筛选与口径”工作表。null 留空、0 保留、比例明确单位。字符串按 Excel 文本写入，不能解释为公式。复用现有后端 XLSX 工具，不接受前端生成 CSV 冒充 Excel。
 
 导出复用报表的统计和权限代码；不要把 manager 默认20行分页用于导出。若需要全量规模上限，返回明确 422/413 错误，禁止静默截断。成功文件使用现有流式/字节响应模式。业务报错保持 JSON 错误结构。
 

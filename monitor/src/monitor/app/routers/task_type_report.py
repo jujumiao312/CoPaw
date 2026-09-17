@@ -213,7 +213,7 @@ async def task_type_report_export(
             timeout=REPORT_TIMEOUT_SECONDS,
         )
         content = await run_in_threadpool(
-            export_task_type_report, report, params, bbk_id
+            export_task_type_report, report, params.task_type
         )
         filename = quote(
             f"Claw报表_{params.start_date}_{params.end_date}.xlsx"

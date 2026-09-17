@@ -9,6 +9,16 @@
 | `task_type_report_sql.py` | 参数化聚合 SQL 构造（`Scope`、`build_queries`、`META_QUERY_NAMES`） |
 | `task_type_report_export.py`、`routers/task_type_report.py` | XLSX 导出与 HTTP 契约，本次未改动 |
 
+2026-09-17 导出列修正：`task_type_report_export.py` 的固定 `COLUMNS` 改为按报表组列的 `column_labels(group_by, skill_detail, task_type)`，并删掉“筛选与口径”工作表。定位导出列问题先看这个函数，不要再去翻工作簿代码；导出与统计共用 `get_report`，指标本身没有变化。
+
+| 输入 | 列集合 |
+| --- | --- |
+| `group_by` | `overall` 无标识列；`branch` 分行号/名称；`org` 再加网点号/名称；`manager` 再加客户经理ID/姓名、SAP号/岗位 |
+| `skill_detail` | 追加技能名称（不导出技能ID） |
+| `task_type` | 剔除该类型天然不产出的指标（`ask_plan` 活跃客户经理人数；`push_other` 方案与点击类共 9 列） |
+
+“天然不产出”直接复用 `task_type_report_rows.NULL_FIELDS` 与 `RATIOS`：分子或分母缺失的比例列也会一起剔除，避免导出整列恒空。`routers/task_type_report.py` 的 `export_task_type_report` 现在只接收 `report` 和 `task_type`，`params` 与 `bbk_id` 不再是导出参数。
+
 `get_report` 现在是线性流程：`enforce_branch` → `report_db` → `_resolve_snapshot` → `_resolve_scope` → `_build_scope` → `_collect`（分页或全量）→ `_build_response`，每一步的耗时都对应一个 `stage`。排查慢查询或超时先看日志，不要先读 SQL。
 
 ## 期间事实与慢查询排查（2026-09-16）
