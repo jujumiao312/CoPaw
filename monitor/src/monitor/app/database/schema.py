@@ -804,6 +804,72 @@ AFTER async_status
 """
 
 
+# 任务类型报表落盘表（Hive 侧 hive/task_type_report_daily.sql 每天导出一次）
+# 维度列统一 NOT NULL DEFAULT ''：'不适用' 与 '名单机构缺失' 都用空串表示，
+# 保证唯一键可用、重跑可以按主键覆盖。
+CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_task_type_report_snapshot (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    prt_dt            DATE NOT NULL COMMENT '跑数日期，等于接口 end_date 与统计截止日',
+    source_id         VARCHAR(64) NOT NULL COMMENT '来源标识 (X-Source-Id header)',
+    rpt_combo         VARCHAR(32) NOT NULL COMMENT '报表组合: overall/branch/org/manager/branch_skill/org_skill/manager_skill',
+    task_type         VARCHAR(16) NOT NULL COMMENT '任务类型: push_plan/ask_plan/push_other',
+    first_bbk_id      VARCHAR(32) NOT NULL DEFAULT '' COMMENT '一级分行号，不适用为空串',
+    org_id            VARCHAR(32) NOT NULL DEFAULT '' COMMENT '网点号，不适用为空串',
+    user_id           VARCHAR(64) NOT NULL DEFAULT '' COMMENT '客户经理编号(SAP号)，不适用为空串',
+    skill_id          VARCHAR(128) NOT NULL DEFAULT '' COMMENT '技能ID，非技能明细为空串',
+    first_bbk_nm      VARCHAR(256) DEFAULT '' COMMENT '一级分行名称',
+    org_nm            VARCHAR(256) DEFAULT '' COMMENT '网点名称',
+    user_name         VARCHAR(256) DEFAULT '' COMMENT '客户经理姓名',
+    pst_lvl           VARCHAR(64) DEFAULT '' COMMENT '岗位定级',
+    cn_name           VARCHAR(256) DEFAULT '' COMMENT '技能中文名',
+    task_type_name    VARCHAR(64) DEFAULT '' COMMENT '任务类型名称',
+    skill_cnt         BIGINT NOT NULL DEFAULT 0 COMMENT '技能数 skill_count',
+    active_manager_cnt BIGINT DEFAULT NULL COMMENT '活跃客户经理数，主动提问为 NULL',
+    suc_execute_job   BIGINT NOT NULL DEFAULT 0 COMMENT '成功执行任务数',
+    read_tasks        BIGINT NOT NULL DEFAULT 0 COMMENT '已查看任务数',
+    read_rate         DECIMAL(18,2) DEFAULT NULL COMMENT '任务查看率(%)，零分母为 NULL',
+    recommended_customers BIGINT DEFAULT NULL COMMENT '方案客户数，推送(非名单方案)为 NULL',
+    read_customer_cnt BIGINT DEFAULT NULL COMMENT '已查看方案客户数',
+    plan_read_rate    DECIMAL(18,2) DEFAULT NULL COMMENT '方案查看率(%)',
+    insight_customer_cnt BIGINT DEFAULT NULL COMMENT '洞察客户数',
+    click_to_insight_rate DECIMAL(18,2) DEFAULT NULL COMMENT '洞察覆盖率(%)',
+    insight_cnt       BIGINT DEFAULT NULL COMMENT '点击客户洞察总次数',
+    phone_customer_cnt BIGINT DEFAULT NULL COMMENT '电访客户数',
+    click_to_phone_rate DECIMAL(18,2) DEFAULT NULL COMMENT '电访覆盖率(%)',
+    phone_cnt         BIGINT DEFAULT NULL COMMENT '点击去电访总次数',
+    stat_start_dt     DATE DEFAULT NULL COMMENT '统计区间起始日（当月1号）',
+    stat_end_dt       DATE DEFAULT NULL COMMENT '统计区间截止日（跑数日期）',
+    loaded_at         DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '出仓写入时间',
+
+    UNIQUE KEY uk_swe_ttr_row (prt_dt, source_id, rpt_combo, task_type,
+        first_bbk_id, org_id, user_id, skill_id),
+    INDEX idx_swe_ttr_branch (prt_dt, source_id, rpt_combo, first_bbk_id, org_id),
+    INDEX idx_swe_ttr_user (prt_dt, source_id, rpt_combo, user_id),
+    INDEX idx_swe_ttr_skill (prt_dt, source_id, rpt_combo, skill_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='金葵花任务类型报表落盘快照';
+"""
+
+# 出仓批次表：记录每个 跑数日期 + 来源 的批次状态，供接口判断数据是否就绪。
+CREATE_TASK_TYPE_REPORT_BATCH_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_task_type_report_batch (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    prt_dt            DATE NOT NULL COMMENT '跑数日期',
+    source_id         VARCHAR(64) NOT NULL COMMENT '来源标识',
+    stat_start_dt     DATE DEFAULT NULL COMMENT '统计区间起始日（当月1号）',
+    stat_end_dt       DATE DEFAULT NULL COMMENT '统计区间截止日（跑数日期）',
+    sync_date         VARCHAR(32) DEFAULT '' COMMENT '名单快照日，用于机构/权限校验',
+    status            VARCHAR(16) NOT NULL DEFAULT 'loading' COMMENT '批次状态: loading/ready/failed',
+    row_total         BIGINT NOT NULL DEFAULT 0 COMMENT '本批次写入行数',
+    message           VARCHAR(512) DEFAULT '' COMMENT '失败原因或备注',
+    loaded_at         DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '写入时间',
+    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+
+    UNIQUE KEY uk_swe_ttr_batch (prt_dt, source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='金葵花任务类型报表出仓批次';
+"""
+
+
 # pylint: disable=too-many-statements
 async def init_database_tables() -> None:
     """Initialize database tables for cron monitoring.
@@ -854,6 +920,16 @@ async def init_database_tables() -> None:
 
         await db.execute(CREATE_CRON_SUBTASKS_TABLE)
         logger.info("Created cron_subtasks table (or already exists)")
+
+        await db.execute(CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE)
+        logger.info(
+            "Created task_type_report_snapshot table (or already exists)",
+        )
+
+        await db.execute(CREATE_TASK_TYPE_REPORT_BATCH_TABLE)
+        logger.info(
+            "Created task_type_report_batch table (or already exists)",
+        )
 
         await db.execute(CREATE_CRON_RESULT_INDEX_TABLE)
         logger.info("Created cron_result_index table (or already exists)")
