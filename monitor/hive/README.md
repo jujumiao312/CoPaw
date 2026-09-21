@@ -49,6 +49,10 @@ hive -hivevar INPUT_DATE=2026-09-17 -f task_type_report_daily.sql
 
 ## 1.1 出仓到 TDSQL
 
+> 生产链路已切到高斯（`gauss/task_type_report_daily.sql` → `AALC_P_RM_CLAW_LIST_USE_IND_STAT`
+> → `gauss/task_type_report_tdsql.sql`），本节与 `task_type_report_tdsql.sql` 保留作 Hive 版参考；
+> 两条链路的落盘表结构由 `src/monitor/app/database/schema.py` 统一维护。
+
 Hive 跑完后把这 8 个分区逐个导出到 TDSQL，供落盘接口读取；建表与装载步骤见
 [task_type_report_tdsql.sql](task_type_report_tdsql.sql)，关键是四点：
 

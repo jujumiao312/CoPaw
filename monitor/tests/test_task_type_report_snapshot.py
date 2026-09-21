@@ -7,6 +7,7 @@ SQLite 只用于验证逻辑与 SQL 形状，不代表 TDSQL 方言与性能验�
 import sqlite3
 from datetime import date
 from io import BytesIO
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -14,14 +15,17 @@ import pytest
 from openpyxl import load_workbook
 
 from monitor.app._app import app
+from monitor.app.database import schema
 from monitor.app.models.task_type_report import ReportOptionsParams
 from monitor.app.models.task_type_snapshot import SnapshotReportParams
 from monitor.app.services.cron import task_type_report as cron_report
 from monitor.app.services.report.task_type_snapshot import (
+    BATCH_COLUMNS,
+    SNAPSHOT_COLUMNS,
     TaskTypeSnapshotService,
 )
 
-BASE_URL = "/api/monitor/report/task-type"
+BASE_URL = "/api/monitor/cron/report/task-type"
 HEADERS = {"X-Source-Id": "S", "X-Bbk-Id": "100"}
 DATE = "2026-09-17"
 DATE_VALUE = date(2026, 9, 17)
@@ -61,7 +65,7 @@ class SqliteConnection:
 
 SCHEMA = """
 CREATE TABLE swe_task_type_report_snapshot(
-    id INTEGER PRIMARY KEY AUTOINCREMENT, prt_dt TEXT, source_id TEXT,
+    prt_dt TEXT, source_id TEXT,
     rpt_combo TEXT, task_type TEXT, first_bbk_id TEXT DEFAULT '',
     org_id TEXT DEFAULT '', user_id TEXT DEFAULT '', skill_id TEXT DEFAULT '',
     first_bbk_nm TEXT DEFAULT '', org_nm TEXT DEFAULT '',
@@ -70,7 +74,7 @@ CREATE TABLE swe_task_type_report_snapshot(
     active_manager_cnt INTEGER, suc_execute_job INTEGER DEFAULT 0,
     read_tasks INTEGER DEFAULT 0, read_rate REAL,
     recommended_customers INTEGER, read_customer_cnt INTEGER,
-    plan_read_rate REAL, insight_customer_count INTEGER,
+    plan_read_rate REAL, insight_customer_cnt INTEGER,
     click_to_insight_rate REAL, insight_cnt INTEGER,
     phone_customer_cnt INTEGER, click_to_phone_rate REAL,
     phone_cnt INTEGER, stat_start_dt TEXT, stat_end_dt TEXT);
@@ -450,6 +454,26 @@ async def test_source_isolation(env):
 
 
 @pytest.mark.asyncio
+async def test_missing_sync_date_is_not_ready(env):
+    """有权限客户经理数靠名单快照日实时算：缺了它必须 409，不能静默返回全 0。"""
+    env.raw.execute(
+        "UPDATE swe_task_type_report_batch SET sync_date = '' "
+        "WHERE prt_dt = ? AND source_id = 'S'",
+        (DATE,),
+    )
+    env.raw.commit()
+    with pytest.raises(cron_report.ReportError) as excinfo:
+        await service().get_report(params(group_by="manager"), "S", "100")
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.code == "report_snapshot_not_ready"
+    response = await request(
+        query={"end_date": DATE, "group_by": "manager", "task_type": "push_plan"}
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "report_snapshot_not_ready"
+
+
+@pytest.mark.asyncio
 async def test_dates_and_status(env):
     dates = await service().get_dates("S")
     assert [item.prt_dt.isoformat() for item in dates.items] == [
@@ -535,6 +559,11 @@ async def test_http_export_xlsx(env):
     assert sheet.max_row == 3
     assert sheet["A1"].value == "分行号"
     assert sheet["A2"].value == "001"
+    # 有权限客户经理数不在数据源里，导出必须带上接口实时算出来的值
+    headers = [cell.value for cell in sheet[1]]
+    assert "有权限客户经理数" in headers
+    permission_column = headers.index("有权限客户经理数") + 1
+    assert sheet.cell(row=2, column=permission_column).value == 1
     skill_export = await request(
         path=f"{BASE_URL}/export",
         query={
@@ -595,3 +624,97 @@ async def test_http_dates_status_and_options(env):
         query={"end_date": DATE, "kind": "unknown"},
     )
     assert bad_kind.status_code == 422
+
+
+def seed_high_source(connection: sqlite3.Connection) -> None:
+    """造一批按高斯落数口径写入的行：不适用维度写 'ALL'。"""
+    connection.execute(
+        "INSERT INTO swe_task_type_report_batch VALUES(?,?,?,?,?,?,?,?)",
+        (DATE, "G", "2026-09-01", DATE, DATE, "ready", 4, "2026-09-18 02:00:00"),
+    )
+    connection.executemany(
+        "INSERT INTO swe_task_type_report_snapshot ("
+        "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id,"
+        " user_id, skill_id, first_bbk_nm, org_nm, user_name, pst_lvl,"
+        " cn_name, task_type_name, active_manager_cnt) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            (
+                DATE, "G", "overall", "push_plan", "ALL", "ALL", "ALL", "ALL",
+                "ALL", "ALL", "ALL", "ALL", "ALL", LABELS["push_plan"], 7,
+            ),
+            (
+                DATE, "G", "branch", "push_plan", "001", "ALL", "ALL", "ALL",
+                "甲分行", "ALL", "ALL", "ALL", "ALL", LABELS["push_plan"], 7,
+            ),
+            (
+                DATE, "G", "manager", "push_plan", "001", "01", "alice", "ALL",
+                "甲分行", "同名支行", "alice", "L2", "ALL",
+                LABELS["push_plan"], None,
+            ),
+            (
+                DATE, "G", "branch", "push_plan", "ALL", "ALL", "ALL", "ALL",
+                "ALL", "ALL", "ALL", "ALL", "ALL", LABELS["push_plan"], 7,
+            ),
+        ],
+    )
+    connection.commit()
+
+
+@pytest.mark.asyncio
+async def test_not_applicable_all_never_reaches_client(env):
+    """高斯写 'ALL' 表示“本组合用不到的维度”，出参只能是 null。"""
+    seed_high_source(env.raw)
+    overall = await service().get_report(params(), "G", "100")
+    for row in overall.items:
+        assert row.first_bbk_id is None
+        assert row.org_id is None
+        assert row.user_id is None
+        assert row.skill_id is None
+        assert row.first_bbk_name is None
+        assert row.cn_name is None
+        assert row.pst_lvl is None
+    branch = await service().get_report(params(group_by="branch"), "G", "100")
+    by_bbk = {row.first_bbk_id: row for row in branch.items}
+    assert by_bbk["001"].first_bbk_name == "甲分行"
+    assert by_bbk["001"].org_id is None
+    assert by_bbk["001"].skill_id is None
+    # 组合维度列自己也是 'ALL' 时（上游异常数据）同样不能当机构号返回
+    assert None in by_bbk
+    assert by_bbk[None].first_bbk_name is None
+    manager = await service().get_report(params(group_by="manager"), "G", "100")
+    assert manager.items[0].user_id == "alice"
+    assert manager.items[0].sapid == "alice"
+    assert manager.items[0].pst_lvl == "L2"
+    assert manager.items[0].cn_name is None
+    response = await request(
+        query={"end_date": DATE, "group_by": "manager"},
+        headers={"X-Source-Id": "G", "X-Bbk-Id": "100"},
+    )
+    assert response.status_code == 200
+    assert "ALL" not in response.text
+
+
+def test_selected_columns_exist_in_table_ddl():
+    """服务查询的列必须都建在表里：SQLite 夹具发现不了列名写错的情况。"""
+
+    def declared_columns(ddl: str) -> set[str]:
+        return set(
+            re.findall(
+                r"^ {4}([a-z_]+)\s+"
+                r"(?:BIGINT|DATE|DATETIME|VARCHAR|DECIMAL|CHAR)\b",
+                ddl,
+                re.M,
+            )
+        )
+
+    snapshot_columns = declared_columns(
+        schema.CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE
+    )
+    batch_columns = declared_columns(schema.CREATE_TASK_TYPE_REPORT_BATCH_TABLE)
+    assert {column.strip() for column in SNAPSHOT_COLUMNS.split(",")} <= (
+        snapshot_columns
+    )
+    assert {column.strip() for column in BATCH_COLUMNS.split(",")} <= (
+        batch_columns
+    )

@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """金葵花任务类型报表（落盘快照）接口。
 
-数据来自 Hive 预聚合后出仓到 TDSQL 的 swe_task_type_report_snapshot，
+数据来自高斯预聚合（AALC_P_RM_CLAW_LIST_USE_IND_STAT）后装载到 TDSQL 的
+swe_task_type_report_snapshot，
 覆盖在线 /task-type-report 与 /task-type-report/export 的全部查询、导出能力，
 并补充可用跑数日期与批次状态两个运维接口。错误码、请求头与出参结构与在线接口
 保持一致，前端切换时只需要换 URL 与日期参数。
@@ -44,8 +45,10 @@ from ..services.report.task_type_snapshot import (
 
 from .task_type_report import ReportRoute, report_errors
 
+# 挂回 /monitor/cron 前缀：网关只把 /api/monitor/cron/* 转发给本服务，
+# 独立前缀 /monitor/report 会 404（旧在线接口同样在 cron 前缀下）。
 router = APIRouter(
-    prefix="/monitor/report", tags=["report"], route_class=ReportRoute
+    prefix="/monitor/cron/report", tags=["report"], route_class=ReportRoute
 )
 REPORT_TIMEOUT_SECONDS = 50
 MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")

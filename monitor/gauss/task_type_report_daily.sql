@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 金葵花任务类型报表 —— 高斯（GaussDB）跑数脚本（每天重跑近 7 天 + 当天）
 --
--- 对应目标表：${AALC_DATA}.AALC_RM_TASK_TYPE_RPT（建表见 gauss/task_type_report_tables.sql）
+-- 对应目标表：${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT（建表见 gauss/task_type_report_tables.sql）
 -- 入参      ：${v_Trx_Dt}  跑数日期（yyyy-MM-dd，由调度传入，与高斯示例脚本变量名一致）
 -- 来源库    ：${NDS_DATA} 原始层（NLQ13_SWE_*）、${AALC_DATA} 分析层（客户经理名单与目标表）
 -- 血缘      ：本脚本由 hive/task_type_report_daily.sql 逐段移植，口径一致；
@@ -2468,7 +2468,7 @@ group by D.REPLAY_SEQ, D.SOURCE_ID, D.K_FRS_BBK_ORG_ID, D.K_BRN_ORG_ID, D.K_CM_I
 -- -----------------------------------------------------------------------------
 -- 6.0 清理近 8 天分区数据（重跑幂等，按 DW_DAT_DT）
 -- -----------------------------------------------------------------------------
-delete from ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+delete from ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
  where DW_DAT_DT >= CAST('${v_Trx_Dt}' AS DATE) - 7
    and DW_DAT_DT <= CAST('${v_Trx_Dt}' AS DATE)
 ;
@@ -2477,7 +2477,7 @@ delete from ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表
 -- -----------------------------------------------------------------------------
 -- 6.1 总体汇总（RPT_COMBO = 'overall'）
 -- -----------------------------------------------------------------------------
-insert into ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+insert into ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
 (
  DW_DAT_DT, SOURCE_ID, RPT_COMBO, FRS_BBK_ORG_ID, FRS_BBK_ORG_NM, BRN_ORG_ID
 ,BRN_ORG_NM, CM_ID, CM_NM, PST_LVL, SKILL_ID, SKILL_NM, JOB_TYPE, JOB_TYPE_NM
@@ -2526,7 +2526,7 @@ inner join TF_CALENDAR as CAL    /* 重跑日历 */
 -- -----------------------------------------------------------------------------
 -- 6.2 分行汇总（RPT_COMBO = 'branch'）
 -- -----------------------------------------------------------------------------
-insert into ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+insert into ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
 (
  DW_DAT_DT, SOURCE_ID, RPT_COMBO, FRS_BBK_ORG_ID, FRS_BBK_ORG_NM, BRN_ORG_ID
 ,BRN_ORG_NM, CM_ID, CM_NM, PST_LVL, SKILL_ID, SKILL_NM, JOB_TYPE, JOB_TYPE_NM
@@ -2577,7 +2577,7 @@ left join TF_BBK_NAME as NB    /* 分行名称 */
 -- -----------------------------------------------------------------------------
 -- 6.3 支行汇总（RPT_COMBO = 'org'）
 -- -----------------------------------------------------------------------------
-insert into ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+insert into ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
 (
  DW_DAT_DT, SOURCE_ID, RPT_COMBO, FRS_BBK_ORG_ID, FRS_BBK_ORG_NM, BRN_ORG_ID
 ,BRN_ORG_NM, CM_ID, CM_NM, PST_LVL, SKILL_ID, SKILL_NM, JOB_TYPE, JOB_TYPE_NM
@@ -2631,7 +2631,7 @@ left join TF_ORG_NAME as NO    /* 网点名称 */
 -- -----------------------------------------------------------------------------
 -- 6.4 客户经理汇总（RPT_COMBO = 'manager'）
 -- -----------------------------------------------------------------------------
-insert into ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+insert into ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
 (
  DW_DAT_DT, SOURCE_ID, RPT_COMBO, FRS_BBK_ORG_ID, FRS_BBK_ORG_NM, BRN_ORG_ID
 ,BRN_ORG_NM, CM_ID, CM_NM, PST_LVL, SKILL_ID, SKILL_NM, JOB_TYPE, JOB_TYPE_NM
@@ -2687,7 +2687,7 @@ left join TF_JKH_ROSTER as RK    /* 金葵花客户经理名单快照 */
 -- -----------------------------------------------------------------------------
 -- 6.5 分行 + 技能明细（RPT_COMBO = 'branch_skill'）
 -- -----------------------------------------------------------------------------
-insert into ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+insert into ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
 (
  DW_DAT_DT, SOURCE_ID, RPT_COMBO, FRS_BBK_ORG_ID, FRS_BBK_ORG_NM, BRN_ORG_ID
 ,BRN_ORG_NM, CM_ID, CM_NM, PST_LVL, SKILL_ID, SKILL_NM, JOB_TYPE, JOB_TYPE_NM
@@ -2741,7 +2741,7 @@ left join TF_SKILL_CATALOG as NK    /* 技能目录（纳入统计的市场技�
 -- -----------------------------------------------------------------------------
 -- 6.6 支行 + 技能明细（RPT_COMBO = 'org_skill'）
 -- -----------------------------------------------------------------------------
-insert into ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+insert into ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
 (
  DW_DAT_DT, SOURCE_ID, RPT_COMBO, FRS_BBK_ORG_ID, FRS_BBK_ORG_NM, BRN_ORG_ID
 ,BRN_ORG_NM, CM_ID, CM_NM, PST_LVL, SKILL_ID, SKILL_NM, JOB_TYPE, JOB_TYPE_NM
@@ -2798,7 +2798,7 @@ left join TF_SKILL_CATALOG as NK    /* 技能目录（纳入统计的市场技�
 -- -----------------------------------------------------------------------------
 -- 6.7 客户经理 + 技能明细（RPT_COMBO = 'manager_skill'）
 -- -----------------------------------------------------------------------------
-insert into ${AALC_DATA}.AALC_RM_TASK_TYPE_RPT    /* 金葵花任务类型报表 */
+insert into ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务类型报表 */
 (
  DW_DAT_DT, SOURCE_ID, RPT_COMBO, FRS_BBK_ORG_ID, FRS_BBK_ORG_NM, BRN_ORG_ID
 ,BRN_ORG_NM, CM_ID, CM_NM, PST_LVL, SKILL_ID, SKILL_NM, JOB_TYPE, JOB_TYPE_NM

@@ -3,6 +3,10 @@
 --
 -- 用途：承接 hive/task_type_report_daily.sql 的预聚合结果，供
 --       /api/monitor/report/task-type（查询）与 .../export（导出）读取。
+-- 状态：生产链路已切到高斯（gauss/task_type_report_tdsql.sql + 高斯跑数脚本），本文件
+--       保留作历史参考。注意：本节建表语句仍是 Hive 时代的结构（自增主键、窄列宽、
+--       没有 dim_hash），与新表结构不一致；权威结构见 src/monitor/app/database/schema.py，
+--       若要恢复 Hive 链路，请按 schema.py 重新生成建表语句，不要照抄本节。
 -- 说明：同样两张表的建表语句已内置于服务端
 --       src/monitor/app/database/schema.py，服务启动时会自动创建；
 --       本文件用于 DBA 手工建表、权限审批与出仓装载，字段必须与 schema.py 一致。

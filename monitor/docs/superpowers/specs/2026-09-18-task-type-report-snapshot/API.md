@@ -1,19 +1,23 @@
 # 任务类型报表落盘接口（/api/monitor/report/task-type*）
 
-更新：2026-09-18。本文是落盘接口的契约真源。指标口径仍以
+更新：2026-09-20。本文是落盘接口的契约真源。指标口径仍以
 [../2026-09-13-jkh-task-report/DESIGN.md](../2026-09-13-jkh-task-report/DESIGN.md) 与
 [DIMENSIONS.md](../2026-09-13-jkh-task-report/DIMENSIONS.md) 为准；本文只说明数据来源替换成
-Hive 预聚合落盘表之后的参数、响应与差异。
+数仓预聚合落盘表（高斯 → TDSQL）之后的参数、响应与差异。
 
 ## 1. 定位与数据来源
 
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 把 `/task-type-report`、`/task-type-report/export` 的全部能力改为读预聚合表，降低 TDSQL 明细扫描压力 |
-| 数据表 | `swe_task_type_report_snapshot`（报表行）、`swe_task_type_report_batch`（出仓批次） |
-| 生产链路 | Hive `hive/task_type_report_daily.sql` → 导出 → TDSQL 装载（`hive/task_type_report_tdsql.sql`） |
+| 数据表 | `swe_task_type_report_snapshot`（报表行）、`swe_task_type_report_batch`（批次状态与名单快照日） |
+| 表结构 | `gauss/task_type_report_tdsql.sql`（建表语句 + 写入约定；权威结构是 `src/monitor/app/database/schema.py`） |
+| 数据写入 | 由现场作业自行写入，本仓库不提供装载脚本；写入方须按该文件第 3 节遵守列语义（`'ALL'`、NULL 规则）、批次就绪信号与 `sync_date` 约定 |
+| 行覆盖 | 主键 `(prt_dt, source_id, dim_hash)`，同键 upsert 即幂等重写；源侧已消失的维度行若没被清掉会继续出数，属已确认取舍 |
+| 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口按批次 `sync_date` 的 `jkh_user_inf` + 当前 source 的 `swe_tenant_init_source` 实时计算；技能明细组合沿用它所在层级的维度统计；批次缺 `sync_date` 返回 409，不会返回全 0 |
 | 在线接口 | `/api/monitor/cron/task-type-report`、`/export`、`/options` 保持不变，仍按明细实时统计 |
 | 代码 | `routers/task_type_snapshot.py`、`services/report/task_type_snapshot.py`、`models/task_type_snapshot.py` |
+| 历史链路 | Hive 版（`hive/task_type_report_tdsql.sql`）保留作参考，其建表语句已过时，以 `schema.py` 为准 |
 
 接口前缀 `/api/monitor/report`，五个接口：
 
@@ -113,7 +117,9 @@ Hive 预聚合落盘表之后的参数、响应与差异。
 1. `metric_version` 为 `jkh_task_report_v1_snapshot`，`consistency` 为 `snapshot`；
 2. 新增 `prt_dt` / `rpt_combo` / `batch` 三个字段，说明数据来自哪个批次；
 3. `start_date` 固定为当月 1 号，`warnings` 固定包含 `snapshot_month_to_date`；
-4. 不适用维度返回 `null`；机构维度存在但名单里缺机构号时返回空串（与在线接口一致）。
+4. 不适用维度返回 `null`：上游对“本组合用不到的维度”落的是 `'ALL'`（含名称列，
+   见 [gauss/README.md](../../../gauss/README.md) 第 4 节），接口按组合维度与 `'ALL'`
+   两种判据还原成 `null`；机构维度存在但名单里缺机构号时返回空串（与在线接口一致）。
 
 `warnings` 顺序：`period_ratios_not_cohort_conversion` → `snapshot_month_to_date` →
 （技能明细）`skill_rows_not_additive` → （无匹配）`no_matching_organization` /

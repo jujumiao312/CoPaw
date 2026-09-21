@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """金葵花任务类型报表（落盘快照）请求与响应契约。
 
-数据来源是 Hive 预聚合后出仓到 TDSQL 的 swe_task_type_report_snapshot，
+数据来源是高斯预聚合（AALC_P_RM_CLAW_LIST_USE_IND_STAT）后装载到 TDSQL 的
+swe_task_type_report_snapshot，
 口径定义仍在 DESIGN.md / DIMENSIONS.md；行结构复用在线接口的
 ``TaskTypeReportRow``，前端从在线接口切到落盘接口时字段不用改。
 
@@ -81,7 +82,7 @@ def month_first_day(value: date) -> date:
 
 
 class SnapshotBatchInfo(BaseModel):
-    """出仓批次信息；status 不是 ready 时接口按未就绪处理。"""
+    """装载批次信息；status 不是 ready 时接口按未就绪处理。"""
 
     prt_dt: date
     source_id: str

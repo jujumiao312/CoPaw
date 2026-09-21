@@ -2,7 +2,9 @@
 """金葵花任务类型报表落盘快照查询服务。
 
 数据来源：``swe_task_type_report_snapshot`` / ``swe_task_type_report_batch``，
-由 Hive 侧 ``hive/task_type_report_daily.sql`` 预聚合后出仓到 TDSQL。
+由高斯侧 ``gauss/task_type_report_daily.sql`` 预聚合到
+``${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT`` 后装载到 TDSQL
+（装载脚本 ``gauss/task_type_report_tdsql.sql``）。
 
 与在线服务的分工：
 
@@ -11,6 +13,10 @@
   ``resolve_organization_filters``，校验对象是批次记录的名单快照日（sync_date），
   保持 403 / 422 语义与在线接口一致；
 - 有权限客户经理数不在仓内计算，仍按同一名单快照实时统计。
+
+装载侧没有 DELETE 权限（详见 ``gauss/task_type_report_tdsql.sql``），近 8 天重写走 upsert：
+同键的行原地更新、新键插入，因此上游已消失的维度行（离职客户经理、下线技能）会留在表里
+并带着最后一次装载的数值继续出数——这是业务接受的取舍，本模块不做版本过滤。
 
 区间口径：落盘表是「当月 1 号 ~ 跑数日期」的累计快照，因此只支持该区间；
 其它区间请调用在线接口。
@@ -109,7 +115,7 @@ SNAPSHOT_COLUMNS = (
     "user_id, skill_id, first_bbk_nm, org_nm, user_name, pst_lvl, "
     "cn_name, task_type_name, skill_cnt, active_manager_cnt, "
     "suc_execute_job, read_tasks, read_rate, recommended_customers, "
-    "read_customer_cnt, plan_read_rate, insight_customer_count, "
+    "read_customer_cnt, plan_read_rate, insight_customer_cnt, "
     "click_to_insight_rate, insight_cnt, phone_customer_cnt, "
     "click_to_phone_rate, phone_cnt, stat_start_dt, stat_end_dt"
 )
@@ -119,6 +125,8 @@ BATCH_COLUMNS = (
 )
 # 非分页查询一次最多返回的行数；导出走 MAX_EXPORT_ROWS 上限。
 MAX_REPORT_ROWS = 200000
+# 高斯落盘口径：本组合用不到的维度写 'ALL'（空串表示名单里缺机构号，是真实分组）。
+NOT_APPLICABLE = "ALL"
 
 PERIOD_RATIOS = "period_ratios_not_cohort_conversion"
 SNAPSHOT_WINDOW = "snapshot_month_to_date"
@@ -137,11 +145,19 @@ def combo_of(params: SnapshotReportParams) -> str:
 
 
 def _text(value) -> str | None:
-    """空串与 None 统一还原为 None，避免前端显示空字符串。"""
+    """'ALL'（不适用）、空串与 None 统一还原为 None，避免前端显示特殊值。"""
     if value is None:
         return None
     text = str(value)
-    return text or None
+    return None if not text or text == NOT_APPLICABLE else text
+
+
+def _dim(value) -> str | None:
+    """维度编号列：'ALL' 还原为 None；空串保留，它是“名单缺机构号”的真实分组。"""
+    if value is None:
+        return None
+    text = str(value)
+    return None if text == NOT_APPLICABLE else text
 
 
 def _int(value) -> int:
@@ -252,19 +268,19 @@ def _legacy_params(
 async def _resolve_scope(
     db, batch: dict, params: SnapshotReportParams
 ) -> tuple[bool, dict]:
-    """机构范围校验 + 名称解析；批次没有名单快照日时只允许 ID 筛选。"""
+    """机构范围校验 + 名称解析；缺名单快照日按未就绪处理。
+
+    名单快照日是有权限客户经理数、机构范围校验（403）与机构名称解析的共同依据。
+    缺了它，``permission_manager_count`` 只能给出全 0，而且会静默跳过机构范围校验，
+    所以宁可报 409 也不要返回看起来正常、实际是错的数字。
+    """
     sync_date = str(batch.get("sync_date") or "").strip()
     if not sync_date:
-        if params.first_bbk_name or params.org_name:
-            raise ReportError(
-                409,
-                SNAPSHOT_NOT_READY_CODE,
-                "批次缺少名单快照日，无法按机构名称筛选。",
-            )
-        return True, {
-            "first_bbk_id": params.first_bbk_id,
-            "org_id": params.org_id,
-        }
+        raise ReportError(
+            409,
+            SNAPSHOT_NOT_READY_CODE,
+            "批次缺少名单快照日，统计不出有权限客户经理数，请重新装载。",
+        )
     legacy = _legacy_params(params, sync_date)
     await validate_roster_scope(db, sync_date, legacy)
     return await resolve_organization_filters(db, sync_date, legacy)
@@ -431,7 +447,7 @@ async def _fetch_permission_counts(
 def _to_row(
     record: dict, combo: str, permission_counts: dict
 ) -> TaskTypeReportRow:
-    """落盘行还原成接口行：不适用维度置 null，空串名称还原成 null。"""
+    """落盘行还原成接口行：不适用维度（'ALL' 或组合维度之外的列）置 null。"""
     dims = COMBO_DIM_COLUMNS[combo]
     has_bbk = "first_bbk_id" in dims
     has_org = "org_id" in dims
@@ -439,15 +455,15 @@ def _to_row(
     has_skill = "skill_id" in dims
     task_type = str(record.get("task_type") or "")
     return TaskTypeReportRow(
-        first_bbk_id=record.get("first_bbk_id") if has_bbk else None,
+        first_bbk_id=_dim(record.get("first_bbk_id")) if has_bbk else None,
         first_bbk_name=_text(record.get("first_bbk_nm")) if has_bbk else None,
-        org_id=record.get("org_id") if has_org else None,
+        org_id=_dim(record.get("org_id")) if has_org else None,
         org_name=_text(record.get("org_nm")) if has_org else None,
-        user_id=record.get("user_id") if has_user else None,
+        user_id=_dim(record.get("user_id")) if has_user else None,
         user_name=_text(record.get("user_name")) if has_user else None,
-        sapid=record.get("user_id") if has_user else None,
+        sapid=_dim(record.get("user_id")) if has_user else None,
         pst_lvl=_text(record.get("pst_lvl")) if has_user else None,
-        skill_id=record.get("skill_id") if has_skill else None,
+        skill_id=_dim(record.get("skill_id")) if has_skill else None,
         cn_name=_text(record.get("cn_name")) if has_skill else None,
         task_type=task_type,
         task_type_name=_text(record.get("task_type_name"))
@@ -466,7 +482,7 @@ def _to_row(
         read_customer_count=_optional_int(record.get("read_customer_cnt")),
         plan_read_rate=_optional_float(record.get("plan_read_rate")),
         insight_customer_count=_optional_int(
-            record.get("insight_customer_count")
+            record.get("insight_customer_cnt")
         ),
         click_to_insight_rate=_optional_float(
             record.get("click_to_insight_rate")

@@ -10,8 +10,13 @@ Hive 版的说明见 [hive/README.md](../hive/README.md)。
 
 | 文件 | 用途 |
 | --- | --- |
-| `task_type_report_tables.sql` | 目标表 `${AALC_DATA}.AALC_RM_TASK_TYPE_RPT` 建表语句（30 列，列存 + 按 `DW_DAT_DT` 分区 + hash 分布），首次部署执行一次 |
-| `task_type_report_daily.sql` | 每日跑数脚本：一次重写「跑数日期前 7 天 ~ 跑数日期」共 8 个分区，七种组合落同一张表 |
+| `task_type_report_tables.sql` | 目标表 `${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT` 建表语句（30 列，列存 + 按五个维度列 hash 分布、不建分区），首次部署执行一次 |
+| `task_type_report_daily.sql` | 每日跑数脚本：一次重写「跑数日期前 7 天 ~ 跑数日期」共 8 天数据，七种组合落同一张表 |
+| `task_type_report_tdsql.sql` | TDSQL 落盘表（`swe_task_type_report_snapshot` / `_batch`）建表语句、历史库升级与写入约定，接口读它；数据由现场作业写入，见第 7 节 |
+
+`task_type_report_gauss_optimized_v2.sql`、`task_type_report_gauss_optimized_v2_no_lower.sql`、
+`version2.sql` 是调试期间的历史草稿（仍写旧表名 `AALC_RM_TASK_TYPE_RPT`），当前维护的是上表
+前三个文件；继续用草稿要先把表名改成 `AALC_P_RM_CLAW_LIST_USE_IND_STAT`。
 
 | 变量 | 说明 |
 | --- | --- |
@@ -81,7 +86,7 @@ Hive 版的说明见 [hive/README.md](../hive/README.md)。
 
 ## 4. 目标表要点
 
-- 30 列：`DW_DAT_DT`（数据日期 = 分区日期 = 统计区间截止日）+ `SOURCE_ID` / `RPT_COMBO`
+- 30 列：`DW_DAT_DT`（数据日期 = 统计区间截止日）+ `SOURCE_ID` / `RPT_COMBO`
   + 9 个维度列（`FRS_BBK_ORG_ID` / `FRS_BBK_ORG_NM` / `BRN_ORG_ID` / `BRN_ORG_NM` /
   `CM_ID` / `CM_NM` / `PST_LVL` / `SKILL_ID` / `SKILL_NM`）+ `JOB_TYPE` / `JOB_TYPE_NM`
   + 14 个指标列；表结构见 `task_type_report_tables.sql`。
@@ -97,8 +102,11 @@ Hive 版的说明见 [hive/README.md](../hive/README.md)。
 - 指标列的 NULL 规则与接口一致：`ask_plan` 的活跃/任务状态列为 `NULL`、`push_other`
   的方案与点击类 9 列为 `NULL`、零分母为 `NULL`；`ACTIVE_MANAGER_CNT` 只在总体/分行/支行
   维度有值，`ACTIVE_JOB_CNT` / `PAUSED_JOB_CNT` 只在客户经理维度有值。
-- 建表只给了一个兜底分区 `P_MAX`，上线前按数仓规范按日/按月建分区；库名、存储参数、
-  压缩级别按现场规范调整。
+- 表按现场规范建**列存 + hash 分布（五个维度列）、不建分区**，重跑靠第 6 段的
+  `delete + insert` 覆盖近 8 天；库名、存储参数、压缩级别按现场规范调整。
+- 列宽比 Hive 版宽：`SOURCE_ID` 100、`RPT_COMBO` 100、`JOB_TYPE` 100、`FRS_BBK_ORG_ID` /
+  `CM_ID` 200、`BRN_ORG_ID` 100、`SKILL_ID` 500、名称列 500/1000。**TDSQL 落盘表的列宽按
+  这套宽度对齐**，否则超长值在装载时会被截断或报 1406（见第 7 节）。
 - `permission_manager_count`（有权限客户经理数）仍在接口侧实时计算，不落这张表。
 
 ## 5. 上线前待确认
@@ -111,8 +119,10 @@ Hive 版的说明见 [hive/README.md](../hive/README.md)。
    数据量大时可用 `DW_DAT_DT` 收窄，但要注意漏掉迟到数据会让主动提问/方案客户数偏小，
    取舍需与业务确认。
 4. 分布键、分区策略、列存参数与并发度按目标集群压测后调整。
-5. 目标表是否也要像 Hive 链路那样出仓到 TDSQL 供
-   `/api/monitor/report/task-type*` 使用；如需出仓，装载脚本与列顺序要按本文第 4 节重写。
+5. TDSQL 落盘表结构已按本表写好（见 [task_type_report_tdsql.sql](task_type_report_tdsql.sql)
+   与第 7 节），**数据写入由现场作业负责**：按第 6 段重写的日期逐日写入，并把名单快照日
+   `sync_date`（第 1.1 段选出的 `DW_Snsh_Dt`）写进批次表——高斯表里不存该列，接口的
+   有权限客户经理数、机构名称解析与 `/task-type/options` 都依赖它。
 
 ## 6. 对账建议
 
@@ -128,3 +138,23 @@ Hive 版的说明见 [hive/README.md](../hive/README.md)。
 4. 客户经理维度注意：`ACTIVE_JOB_CNT` / `PAUSED_JOB_CNT` 是**任务**个数（按 `job.status`
    当前值统计，不受统计区间限制，8 个分区数值相同），分行/支行维度看的是
    `ACTIVE_MANAGER_CNT`（活跃客户经理数），两者不能互相替代。
+
+## 7. TDSQL 落盘表与落盘接口
+
+接口 `/api/monitor/report/task-type*` 读的是 TDSQL 里的两张表，**表结构见
+[task_type_report_tdsql.sql](task_type_report_tdsql.sql)（只含建表语句与写入约定，
+数据由现场作业自行写入，本仓库不含装载脚本）**：
+
+| 项 | 说明 |
+| --- | --- |
+| 目标表 | `swe_task_type_report_snapshot`（报表行）+ `swe_task_type_report_batch`（批次状态与名单快照日） |
+| 列宽 | 按源表取宽（不会被截断）；宽列拼不出主键（InnoDB 索引上限 3072 字节），主键改用 `dim_hash`（组合 + 四个维度列的 MD5） |
+| 主键 | `(prt_dt, source_id, dim_hash)`，没有自增列；同键 upsert 即幂等重写 |
+| 区间列 | `stat_start_dt` / `stat_end_dt` 由写入方按 `prt_dt` 推导（当月 1 号 / `prt_dt`） |
+| 就绪信号 | 接口只读 `status='ready'` 的批次；半份数据或 0 行时不要置 ready，否则接口会把不完整/上一版的数据当成当天数据返回 |
+| 名单快照日 | `sync_date` 必须有值：有权限客户经理数、机构范围校验与机构名称解析都依赖它，为空直接 409 |
+| 权限人数 | `permission_manager_count` 不在表里，由接口按 `jkh_user_inf` + `swe_tenant_init_source` 实时计算 |
+| 空值 | 比例类与「本组合不适用」的指标必须写 `NULL`，写成 `0` 会让接口出参失真（ask_plan 的任务状态列、push_other 的方案/点击列、四个零分母比例列） |
+| `'ALL'` | 落库保留原值（便于区分「不适用」与「机构号缺失空串」），接口侧统一还原成 `null`（`services/report/task_type_snapshot.py` 的 `_text` / `_dim`） |
+| 历史库 | 曾按旧结构建过 TDSQL 表的库，执行该文件第 2 节的升级语句（加宽列 + 换主键），老数据不需要重刷 |
+| 残留行 | 写入方式若删不掉旧行（只能 UPDATE），源侧已消失的维度行会继续出数——业务已确认接受；清理见该文件第 4 节 |
