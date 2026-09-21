@@ -1,3 +1,4 @@
+import dayjs, { type Dayjs } from "dayjs";
 import { buildAuthHeaders } from "../authHeaders";
 import { getApiUrl } from "../config";
 import { request } from "../request";
@@ -69,15 +70,92 @@ export interface ReportOptions {
   sync_date: string | null;
   items: { value: string; label: string }[];
 }
+export interface ReportDateItem {
+  prt_dt: string;
+  status: string;
+}
+export interface ReportDates {
+  latest_ready_prt_dt: string | null;
+  items: ReportDateItem[];
+}
+/** 就绪批次覆盖的日期窗口；窗口之外的状态未知，不做限制。 */
+export interface ReportDateWindow {
+  ready: Set<string>;
+  start: string | null;
+}
+/** 批次不存在或未就绪；页面按“暂无出仓数据”处理，而不是查询失败。 */
+export type SnapshotUnavailable = "missing" | "not_ready";
 export const REPORT_PAGE_SIZE = 20;
-const REPORT_PATH = "/monitor/cron/task-type-report";
+/** 可用跑数日期取最近 90 个批次，覆盖日历上会翻到的范围。 */
+const DATE_WINDOW_LIMIT = 90;
+const REPORT_PATH = "/monitor/report/task-type";
 const XLSX_TYPE =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const UNAVAILABLE_CODES: Record<string, SnapshotUnavailable> = {
+  report_snapshot_not_found: "missing",
+  report_snapshot_not_ready: "not_ready",
+};
 
 export function getTaskReportBbk() {
   return (
     buildAuthHeaders()["X-Bbk-Id"]?.trim() || (isTaskReportDemo() ? "100" : "")
   );
+}
+
+/** 落盘快照按 T-1 出数，页面可选的最新统计日期。 */
+export function latestReportDate(): Dayjs {
+  return dayjs().subtract(1, "day");
+}
+
+/** 默认统计日期：最近就绪批次与 T-1 取较早的一个。 */
+export function defaultReportDate(latestReady?: string | null): Dayjs {
+  const latest = latestReportDate();
+  if (!latestReady) return latest;
+  const ready = dayjs(latestReady);
+  return ready.isValid() && ready.isBefore(latest, "day") ? ready : latest;
+}
+
+export const EMPTY_DATE_WINDOW: ReportDateWindow = {
+  ready: new Set(),
+  start: null,
+};
+
+export function reportDateWindow(dates: ReportDates): ReportDateWindow {
+  const items = dates.items ?? [];
+  return {
+    ready: new Set(
+      items
+        .filter((item) => item.status?.toLowerCase() === "ready")
+        .map((item) => item.prt_dt),
+    ),
+    start: items.reduce<string | null>(
+      (earliest, item) =>
+        !earliest || item.prt_dt < earliest ? item.prt_dt : earliest,
+      null,
+    ),
+  };
+}
+
+/**
+ * 可选统计日期：不超过 T-1；已覆盖的窗口内只放行就绪批次。
+ * 窗口之外的日期状态未知，保持可选，避免把窗口外的历史批次一并锁死。
+ */
+export function canSelectReportDate(
+  value: Dayjs,
+  window: ReportDateWindow,
+): boolean {
+  if (value.isAfter(latestReportDate(), "day")) return false;
+  const day = value.format("YYYY-MM-DD");
+  if (window.ready.has(day)) return true;
+  return window.start === null || day < window.start;
+}
+
+export function snapshotUnavailable(
+  error: unknown,
+): SnapshotUnavailable | null {
+  const code = (error as { data?: { detail?: { code?: string } } })?.data
+    ?.detail?.code;
+  return code ? UNAVAILABLE_CODES[code] ?? null : null;
 }
 
 function scopedParams<T extends { first_bbk_id?: string }>(params: T): T {
@@ -99,10 +177,9 @@ function validateDates(params: ReportParams) {
   if (
     !/^\d{4}-\d{2}-\d{2}$/.test(params.start_date) ||
     !/^\d{4}-\d{2}-\d{2}$/.test(params.end_date) ||
-    params.start_date.slice(0, 7) !== params.end_date.slice(0, 7) ||
-    params.start_date > params.end_date
+    params.start_date !== `${params.end_date.slice(0, 7)}-01`
   ) {
-    throw new Error("日期范围必须位于同一个月且开始日期不晚于结束日期");
+    throw new Error("统计起始日期须为统计日期当月 1 号");
   }
 }
 export function taskReportError(error: unknown): string {
@@ -134,6 +211,15 @@ export async function getTaskReportOptions(
   return request<ReportOptions>(
     `${REPORT_PATH}/options?${queryString(filters)}`,
     { signal, headers: { "X-Bbk-Id": getTaskReportBbk() } },
+  );
+}
+export async function getTaskReportDates(
+  signal?: AbortSignal,
+): Promise<ReportDates> {
+  if (isTaskReportDemo()) return { latest_ready_prt_dt: null, items: [] };
+  return request<ReportDates>(
+    `${REPORT_PATH}/dates?limit=${DATE_WINDOW_LIMIT}`,
+    { signal },
   );
 }
 export async function exportTaskReport(

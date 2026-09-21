@@ -2,15 +2,28 @@ import { useEffect, useRef, useState } from "react";
 import {
   getTaskTypeReport,
   REPORT_PAGE_SIZE,
+  snapshotUnavailable,
   taskReportError,
   type ReportParams,
   type ReportResponse,
+  type SnapshotUnavailable,
 } from "../../../api/modules/taskTypeReport";
 
 interface ReportState {
   data?: ReportResponse;
   loading: boolean;
   error?: string;
+  unavailable?: SnapshotUnavailable;
+}
+
+/** 批次不存在/未就绪按空数据渲染，其余错误照旧走错误态。 */
+function failure(error: unknown): ReportState {
+  const unavailable = snapshotUnavailable(error);
+  return {
+    loading: false,
+    unavailable: unavailable ?? undefined,
+    error: unavailable ? undefined : taskReportError(error),
+  };
 }
 
 export function useReport(params: ReportParams, revision: number) {
@@ -40,8 +53,7 @@ export function useReport(params: ReportParams, revision: number) {
           if (!abort.signal.aborted) setState({ data, loading: false });
         },
         (error: unknown) => {
-          if (!abort.signal.aborted)
-            setState({ error: taskReportError(error), loading: false });
+          if (!abort.signal.aborted) setState(failure(error));
         },
       )
       .finally(() => {
@@ -78,11 +90,7 @@ export function useReport(params: ReportParams, revision: number) {
         });
     } catch (error) {
       if (!abort.signal.aborted)
-        setState((current) => ({
-          ...current,
-          error: taskReportError(error),
-          loading: false,
-        }));
+        setState((current) => ({ ...current, ...failure(error) }));
     } finally {
       if (!abort.signal.aborted) pending.current = false;
     }

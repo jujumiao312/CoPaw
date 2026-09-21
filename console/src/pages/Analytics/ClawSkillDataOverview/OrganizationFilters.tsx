@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import { Alert, Button, Select } from "antd";
 import {
   getTaskReportOptions,
+  snapshotUnavailable,
   taskReportError,
   type ReportOptionParams,
   type ReportOptions,
+  type SnapshotUnavailable,
 } from "../../../api/modules/taskTypeReport";
 import styles from "./index.module.less";
 
@@ -16,6 +18,7 @@ function useOptions(params: ReportOptionParams | null) {
     items: ReportOptions["items"];
     loading: boolean;
     error?: string;
+    unavailable?: SnapshotUnavailable;
   }>({ query, items: [], loading: !!params });
   useEffect(() => {
     const abort = new AbortController();
@@ -28,13 +31,15 @@ function useOptions(params: ReportOptionParams | null) {
             setState({ query, items: data.items, loading: false });
         },
         (error: unknown) => {
-          if (!abort.signal.aborted)
-            setState({
-              query,
-              items: [],
-              loading: false,
-              error: taskReportError(error),
-            });
+          if (abort.signal.aborted) return;
+          const unavailable = snapshotUnavailable(error);
+          setState({
+            query,
+            items: [],
+            loading: false,
+            unavailable: unavailable ?? undefined,
+            error: unavailable ? undefined : taskReportError(error),
+          });
         },
       );
     return () => abort.abort();
@@ -42,7 +47,12 @@ function useOptions(params: ReportOptionParams | null) {
   return {
     ...(state.query === query
       ? state
-      : { items: [], loading: !!params, error: undefined }),
+      : {
+          items: [],
+          loading: !!params,
+          error: undefined,
+          unavailable: undefined,
+        }),
     retry: () => setRevision(revision + 1),
   };
 }
@@ -92,7 +102,7 @@ export function OrganizationFilters({
           value={branch}
           onChange={onBranchChange}
           options={branchOptions}
-          disabled={locked}
+          disabled={locked || !!branches.unavailable}
           allowClear={!locked}
           loading={branches.loading}
           placeholder="全部分行"
@@ -110,7 +120,9 @@ export function OrganizationFilters({
             value={org}
             onChange={onOrgChange}
             options={orgs.items}
-            disabled={!branch || orgs.loading || !!orgs.error}
+            disabled={
+              !branch || orgs.loading || !!orgs.error || !!orgs.unavailable
+            }
             allowClear
             loading={orgs.loading}
             placeholder={branch ? "全部支行" : "请先选择分行"}

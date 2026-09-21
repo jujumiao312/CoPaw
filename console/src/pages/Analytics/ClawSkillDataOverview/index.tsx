@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -16,12 +16,20 @@ import {
   ExclamationCircleOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
-import dayjs, { type Dayjs } from "dayjs";
+import type { Dayjs } from "dayjs";
 import {
+  canSelectReportDate,
+  defaultReportDate,
+  EMPTY_DATE_WINDOW,
   getTaskReportBbk,
+  getTaskReportDates,
+  latestReportDate,
+  reportDateWindow,
   type ReportGroup,
   type ReportRow,
   type ReportParams,
+  type ReportDateWindow,
+  type SnapshotUnavailable,
   type TaskType,
 } from "../../../api/modules/taskTypeReport";
 import { useIframeStore } from "../../../stores/iframeStore";
@@ -100,16 +108,23 @@ function entityName(row: ReportRow, group: ReportGroup) {
     }`;
   return row.first_bbk_name || row.first_bbk_id || "未知分行";
 }
+function unavailableNotice(reason: SnapshotUnavailable, date: string) {
+  return reason === "not_ready"
+    ? `${date} 的数据仍在装载中，请稍后重试或更换统计日期。`
+    : `${date} 没有出仓数据，请更换统计日期。`;
+}
 function ReportTable({
   params,
   columns,
   revision,
   selectedKey,
+  onReload,
 }: {
   params: ReportParams;
   columns: ColumnsType<ReportRow>;
   revision: number;
   selectedKey?: string;
+  onReload?: () => void;
 }) {
   const report = useReport(params, revision);
   const rowKey = (row: ReportRow) =>
@@ -125,6 +140,11 @@ function ReportTable({
         <span aria-live="polite">
           已加载 {report.rows.length} / {report.data?.total ?? 0} 条
         </span>
+        {report.data?.warnings.includes("report_rows_truncated") && (
+          <Tag color="warning">
+            结果超过上限已截断，请缩小筛选范围或导出全量
+          </Tag>
+        )}
         <ReportExport
           params={params}
           disabled={!report.data?.total || report.loading}
@@ -140,6 +160,17 @@ function ReportTable({
             report.data ? (
               <Button onClick={() => void report.loadMore()}>重试加载</Button>
             ) : undefined
+          }
+        />
+      )}
+      {report.unavailable && (
+        <Alert
+          className={styles.notice}
+          type="info"
+          showIcon
+          message={unavailableNotice(report.unavailable, params.end_date)}
+          action={
+            onReload ? <Button onClick={onReload}>重试</Button> : undefined
           }
         />
       )}
@@ -172,6 +203,8 @@ function ReportTable({
         locale={{
           emptyText: report.error
             ? "加载失败，请刷新报表重试"
+            : report.unavailable
+            ? "该统计日期暂无出仓数据"
             : "当前条件下暂无数据，请调整筛选条件",
         }}
       />
@@ -261,6 +294,7 @@ function SkillDetails({
         params={detailParams}
         columns={columns}
         revision={revision}
+        onReload={() => setRevision(revision + 1)}
       />
     </section>
   );
@@ -370,6 +404,7 @@ function ReportResults({ params }: { params: ReportParams }) {
           params={params}
           columns={columns}
           revision={revision}
+          onReload={() => setRevision(revision + 1)}
           selectedKey={
             selected ? entityKey(selected, params.group_by) : undefined
           }
@@ -392,20 +427,33 @@ function ReportResults({ params }: { params: ReportParams }) {
 }
 
 function ScopedReportPage({ bbk }: { bbk: string }) {
-  const [dates, setDates] = useState<[Dayjs, Dayjs]>([
-    dayjs().startOf("month"),
-    dayjs(),
-  ]);
-  const [dateError, setDateError] = useState(false);
+  const [date, setDate] = useState<Dayjs>(() => latestReportDate());
+  const [dateWindow, setDateWindow] =
+    useState<ReportDateWindow>(EMPTY_DATE_WINDOW);
+  const datePicked = useRef(false);
   const [group, setGroup] = useState<ReportGroup>("branch");
   const [task, setTask] = useState<TaskType>("push_plan");
   const [branch, setBranch] = useState<string>(bbk === "100" ? "" : bbk);
   const [org, setOrg] = useState<string>();
   const [search, setSearch] = useState("");
   const [keyword, setKeyword] = useState("");
+  useEffect(() => {
+    const abort = new AbortController();
+    // 默认落在最近就绪批次；取不到时保留 T-1，由报表请求给出空态。
+    getTaskReportDates(abort.signal).then(
+      (dates) => {
+        if (abort.signal.aborted) return;
+        setDateWindow(reportDateWindow(dates));
+        if (datePicked.current) return;
+        setDate(defaultReportDate(dates.latest_ready_prt_dt));
+      },
+      () => undefined,
+    );
+    return () => abort.abort();
+  }, []);
   const params: ReportParams = {
-    start_date: dates[0].format("YYYY-MM-DD"),
-    end_date: dates[1].format("YYYY-MM-DD"),
+    start_date: date.startOf("month").format("YYYY-MM-DD"),
+    end_date: date.format("YYYY-MM-DD"),
     group_by: group,
     task_type: task,
     first_bbk_id: branch || undefined,
@@ -457,25 +505,24 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
         </div>
         <div className={styles.toolbar}>
           <div className={styles.field}>
-            <label htmlFor="report-start">
-              统计日期 <span>不可跨月</span>
+            <label htmlFor="report-date">
+              统计日期{" "}
+              <span>
+                数据 T-1，最多可选 {latestReportDate().format("YYYY-MM-DD")}
+              </span>
             </label>
-            <DatePicker.RangePicker
-              id={{ start: "report-start", end: "report-end" }}
-              aria-label="统计日期范围"
-              value={dates}
+            <DatePicker
+              id="report-date"
+              aria-label="统计日期"
+              value={date}
               allowClear={false}
-              disabledDate={(current, info) =>
-                !!info.from && !current.isSame(info.from, "month")
+              disabledDate={(current) =>
+                !canSelectReportDate(current, dateWindow)
               }
               onChange={(value) => {
-                if (!value?.[0] || !value[1]) return;
-                if (!value[0].isSame(value[1], "month")) {
-                  setDateError(true);
-                  return;
-                }
-                setDateError(false);
-                setDates([value[0], value[1]]);
+                if (!value) return;
+                datePicked.current = true;
+                setDate(value);
                 setOrg(undefined);
               }}
             />
@@ -512,9 +559,6 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
             </div>
           )}
         </div>
-        {dateError && (
-          <Alert type="error" showIcon message="日期范围不能跨月，请重新选择" />
-        )}
         <div className={styles.taskRow}>
           <span className={styles.controlLabel}>任务类型</span>
           <Segmented
