@@ -2,7 +2,7 @@
 -- 金葵花任务类型报表 —— TDSQL（MySQL 兼容）落盘表与装载脚本
 --
 -- 用途：承接 hive/task_type_report_daily.sql 的预聚合结果，供
---       /api/monitor/report/task-type（查询）与 .../export（导出）读取。
+--       /api/monitor/cron/report/task-type（查询）与 .../export（导出）读取。
 -- 状态：生产链路已切到高斯（gauss/task_type_report_tdsql.sql + 高斯跑数脚本），本文件
 --       保留作历史参考。注意：本节建表语句仍是 Hive 时代的结构（自增主键、窄列宽、
 --       没有 dim_hash），与新表结构不一致；权威结构见 src/monitor/app/database/schema.py，

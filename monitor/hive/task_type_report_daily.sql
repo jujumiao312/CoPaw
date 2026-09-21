@@ -1,7 +1,7 @@
 -- =============================================================================
 -- 金葵花任务类型报表 —— Hive 跑数脚本（每天重跑近 7 天 + 当天）
 --
--- 对应接口：GET /api/monitor/report/task-type（metric_version = jkh_task_report_v1_snapshot）
+-- 对应接口：GET /api/monitor/cron/report/task-type（metric_version = jkh_task_report_v1_snapshot）
 -- 入参    ：${hivevar:INPUT_DATE} 跑数日期，格式 yyyy-MM-dd，由调度传入
 -- 出参    ：P_AALC.AALC_RM_TASK_TYPE_RPT（七种组合同一张表，用 RPT_COMBO 区分，
 --           建表与取值见 task_type_report_tables.sql）

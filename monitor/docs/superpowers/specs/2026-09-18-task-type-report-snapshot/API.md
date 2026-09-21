@@ -1,6 +1,6 @@
-# 任务类型报表落盘接口（/api/monitor/report/task-type*）
+# 任务类型报表落盘接口（/api/monitor/cron/report/task-type*）
 
-更新：2026-09-20。本文是落盘接口的契约真源。指标口径仍以
+更新：2026-09-21。本文是落盘接口的契约真源。指标口径仍以
 [../2026-09-13-jkh-task-report/DESIGN.md](../2026-09-13-jkh-task-report/DESIGN.md) 与
 [DIMENSIONS.md](../2026-09-13-jkh-task-report/DIMENSIONS.md) 为准；本文只说明数据来源替换成
 数仓预聚合落盘表（高斯 → TDSQL）之后的参数、响应与差异。
@@ -19,7 +19,10 @@
 | 代码 | `routers/task_type_snapshot.py`、`services/report/task_type_snapshot.py`、`models/task_type_snapshot.py` |
 | 历史链路 | Hive 版（`hive/task_type_report_tdsql.sql`）保留作参考，其建表语句已过时，以 `schema.py` 为准 |
 
-接口前缀 `/api/monitor/report`，五个接口：
+接口前缀 `/api/monitor/cron/report`，五个接口：
+
+> 前缀挂在 `cron` 下不是笔误：网关只把 `/api/monitor/cron/*` 转发给本服务，
+> 独立前缀 `/api/monitor/report` 会落到别的服务返回 404（旧在线接口同样在 cron 前缀下）。
 
 | 接口 | 作用 | 对应在线接口 |
 | --- | --- | --- |
@@ -195,7 +198,7 @@
 
 ## 8. 前端切换指引
 
-1. URL：`/api/monitor/cron/task-type-report` → `/api/monitor/report/task-type`，
+1. URL：`/api/monitor/cron/task-type-report` → `/api/monitor/cron/report/task-type`，
    导出与选项同理；请求头不变。
 2. 日期：把 `start_date`/`end_date` 改为只传 `end_date`（跑数日期），
    日期选择器数据源换成 `/task-type/dates`（默认选 `latest_ready_prt_dt`）。

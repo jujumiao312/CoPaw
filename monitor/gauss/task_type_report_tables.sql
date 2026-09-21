@@ -2,7 +2,7 @@
 -- 金葵花任务类型报表 —— 高斯（GaussDB）目标表结构（现场下发版本，首次部署执行一次）
 --
 -- 跑数脚本：gauss/task_type_report_daily.sql
--- TDSQL 出仓：gauss/task_type_report_tdsql.sql（接口 /api/monitor/report/task-type* 读它）
+-- TDSQL 出仓：gauss/task_type_report_tdsql.sql（接口 /api/monitor/cron/report/task-type* 读它）
 -- 口径真源：docs/superpowers/specs/2026-09-13-jkh-task-report/DESIGN.md、DIMENSIONS.md
 -- 移植说明：gauss/README.md（与 hive/task_type_report_tables.sql 的差异）
 --
@@ -12,12 +12,15 @@
 --      不同组合的行不能混用、也不能相加（技能明细各列本身也不可相加）。
 --   2. DW_DAT_DT 是数据日期：跑数脚本一次重写「跑数日期前 7 天 ~ 跑数日期」共 8 天
 --      （推送当天为基线、统计推送后 7 天），每天整体覆盖（脚本里 delete + insert）。
+--      每天的行用**当天**的名单快照（重跑日 D 用 D 当天的名单）：名单归属/成员判断、
+--      机构名与经理名都按该日快照取值，所以同一客户经理在不同 DW_DAT_DT 的归属可能不同；
+--      名单里没有 D 当天快照时该 DW_DAT_DT 不会落任何行（跑数前 8 天分区仍会被清空）。
 --   3. 某个组合用不到的维度列写 'ALL'（不是 NULL），例如 overall 组合的
 --      一级分行号/网点号/客户经理号/技能号都是 'ALL'；名单里机构号缺失才落空串 ''。
 --      两种值含义不同：消费方不要把 'ALL' 当真实机构号，也不要吞掉空串分组。
 --   4. 客户经理编号列是 CM_ID，一级分行号列是 FRS_BBK_ORG_ID，网点号列是 BRN_ORG_ID，
---      任务类型列是 JOB_TYPE；名称列是 FRS_BBK_ORG_NM / BRN_ORG_NM / CM_NM / SKILL_NM /
---      JOB_TYPE_NM。
+--      任务类型列是 JOB_TYPE（直接存中文：推送 / 主动 / 推送非，即显示名，不再单列
+--      JOB_TYPE_NM）；名称列是 FRS_BBK_ORG_NM / BRN_ORG_NM / CM_NM / SKILL_NM。
 --   5. 活跃客户经理数 ACTIVE_MANAGER_CNT 只在总体/分行/支行维度有值，客户经理维度为 NULL；
 --      当前活跃/暂停任务数 ACTIVE_JOB_CNT / PAUSED_JOB_CNT 只在客户经理维度有值，其余为 NULL。
 --   6. 接口侧的 permission_manager_count（有权限客户经理数）不在仓内计算，因此表中不设该字段。
@@ -46,8 +49,7 @@ create table ${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT    /* 金葵花任务
 ,PST_LVL               VARCHAR(100)                /* 岗位定级 */
 ,SKILL_ID              VARCHAR(500)    NOT NULL    /* 技能ID，非技能明细为 ALL */
 ,SKILL_NM              VARCHAR(1000)               /* 技能中文名，取不到为 NULL，消费方回退展示 SKILL_ID */
-,JOB_TYPE              VARCHAR(100)    NOT NULL    /* 任务类型：push_plan/ask_plan/push_other */
-,JOB_TYPE_NM           VARCHAR(100)                /* 任务类型名称 */
+,JOB_TYPE              VARCHAR(100)    NOT NULL    /* 任务类型（中文）：推送/主动/推送非，即显示名 */
 ,SKILL_CNT             INTEGER                     /* 技能数 skill_count */
 ,ACTIVE_MANAGER_CNT    INTEGER                     /* 活跃客户经理数（总体/分行/支行维度） */
 ,ACTIVE_JOB_CNT        INTEGER                     /* 当前活跃任务数（job.status=active，仅客户经理维度） */

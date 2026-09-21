@@ -83,6 +83,7 @@
 
 | 现象 | 先查 |
 | --- | --- |
+| 整段接口 404 `Not Found`（响应体没有 `code`） | 路由没匹配上，不是业务 404：确认请求前缀是 `/api/monitor/cron/report/*`。网关只转发 `/api/monitor/cron/*`，历史上 `/api/monitor/report/*` 这个独立前缀会落到别的服务 |
 | 404 `report_snapshot_not_found` | `swe_task_type_report_batch` 是否有该 `prt_dt + source_id`；写入方是否漏写批次 |
 | 409 `report_snapshot_not_ready` | 批次 `status` 是否 `ready`；`sync_date` 是否为空 |
 | 422 `report_filter_not_supported` | 是否用 overall/branch 组合做了网点或经理筛选（见 API.md 3.4） |
@@ -143,3 +144,29 @@ WHERE prt_dt = '2026-09-17' AND source_id = 'RMASSIST'
   上线前需在目标 TDSQL 执行 EXPLAIN 并核对接口耗时与导出体积。
 - 数据写入由现场作业负责（本仓库不含装载脚本）：写入方需要按建表文件第 3 节遵守列语义、
   批次就绪信号与 `sync_date` 约定，否则接口会报 404/409 或给出错误数字。
+
+## 8. Gauss V2 no_lower 专用口径
+
+`gauss/task_type_report_gauss_optimized_v2_no_lower.sql` 按每个重跑日的
+`DW_SNSH_DT = REPLAY_DT` 读取名单，同日客户经理唯一，名单不聚合、缺日不回退。
+执行人、归属人、点击人及名称回填均匹配 `REPLAY_SEQ`，防止跨日机构串用。
+分行、网点不再建立名称临时表；最终查询按日期与机构名称 DISTINCT，避免同机构多名经理放大行数。
+
+推送技能按指定的 `ANY(string_to_array(...)) + unnest(...)` 实现：只要任务命中一个
+统计技能，就展开任务的全部技能，不逐个过滤展开结果；未删除包含 NULL 和
+`0001-01-01 00:00:00`。数字与序号辅助表已删除。
+
+主动提问直接生成 `TF_ASK_TRACE`：START_TIME 在各重跑日的月初至次日零点半开区间内，
+且技能在统计目录内。原先非统计技能参与的提问执行数、阅读数和方案客户数也随入口过滤排除。
+主动点击与技能关联复用此表并匹配重跑序号，不再关联无时间限制的 Span。
+这些是此脚本的专用调整，不能再假定与旧 Hive/在线接口完全一致。
+
+本地检查：`venv/Scripts/python.exe scripts/check_gauss_v2_no_lower.py`。
+该检查执行脚本中的名单、主动提问和主动点击 SQL，覆盖跨日换机构、缺日不回退、
+跨月及截止日边界、非统计技能和定时 trace 排除、点击日期隔离；使用 SQLite，
+不代替 Gauss 真库的数组函数、分布式执行计划和全量跑数验证。
+
+名单过滤按指标归属人执行：执行类及推送方案客户指标检查 `EXEC_IN_ROSTER = 1`，
+归属人指标检查 `OWNER_IN_ROSTER = 1`，主动提问、点击与任务状态通过名单内连接过滤。
+尤其 `TF_PUSH_CUST` 不能只过滤 push_plan，否则未匹配名单的执行人会生成空机构维度。
+本地检查包含执行人不存在及对应日期缺名单的回归场景。

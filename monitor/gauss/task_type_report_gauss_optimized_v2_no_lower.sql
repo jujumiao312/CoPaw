@@ -4,8 +4,8 @@
 -- 对应目标表：${AALC_DATA}.AALC_RM_TASK_TYPE_RPT（建表见 gauss/task_type_report_tables.sql）
 -- 入参      ：${v_Trx_Dt}  跑数日期（yyyy-MM-dd，由调度传入，与高斯示例脚本变量名一致）
 -- 来源库    ：${NDS_DATA} 原始层（NLQ13_SWE_*）、${AALC_DATA} 分析层（客户经理名单与目标表）
--- 血缘      ：本脚本由 hive/task_type_report_daily.sql 逐段移植，口径一致；
---             方言差异与逐段对照见 gauss/README.md
+-- 血缘      ：本脚本由 hive/task_type_report_daily.sql 移植；本版按重跑日取名单、主动提问入口过滤统计技能；
+--             本版口径调整见 analysis/playbook/task-type-report-snapshot.md 第 8 节
 --
 -- 统计区间（重跑日历见第 1.0 段）：
 --   一次作业按日历写入 8 个日期分区，重跑日 D 依次取「跑数日期 R 前 7 天 ~ 跑数日期」：
@@ -24,9 +24,7 @@
 --      不再用 Hive 的 substr(时间列, 1, 10) 取字符串日期；
 --   3. 日历表里直接给出 MTH_START_DT（当月 1 号）与 NEXT_DT（次日零点），事实表 join 日历取值，
 --      不用在每处重算 concat(substr(...), '-01')；
---   4. explode(split(skill_ids, ',')) 用「序号辅助表 TF_SEQ + split_part()」替代（见第 1.7 段）：
---      高斯对 FROM 里的 set-returning 函数 / LATERAL 支持与 PostgreSQL 不一致，
---      cross join lateral regexp_split_to_table(...) 会报语法错误，所以不依赖 SRF 与 LATERAL；
+--   4. 技能列表使用 SELECT 中的 unnest(string_to_array(...)) 拆分；
 --   5. 已确认相关枚举字段统一存储为小写，直接使用原生等值比较；
 --      不再执行大小写转换，减少重复函数计算；
 --   6. 不使用 CTE / GROUPING SETS / CUBE / ROLLUP；V2 用少量复制型规则临时表减少事实表重复扫描。
@@ -117,44 +115,14 @@ select
 
 
 -- -----------------------------------------------------------------------------
--- 1.1 名单快照日（对应接口 _resolve_jkh_sync_date）
---     优先级：跑数日期当天 -> 跑数日期当月月末 -> 全表最早日（全表最新日在跑数日期之后）
---             -> 全表最新日；只在 CLB_IND = '3' 口径内选择
---     月末用 date_trunc('month', 跑数日期 + 1 个月) - 1 天 替代 Hive 的 last_day()
--- -----------------------------------------------------------------------------
-drop table if exists TF_JKH_SNAPSHOT;
-create temporary table TF_JKH_SNAPSHOT    /* 客户经理名单快照日 */
-(
- SNAPSHOT_DT           DATE           NOT NULL    /* 名单快照日 */
-)
-WITH (orientation = column, colversion = 2.0, compression = middle)
-on commit preserve rows
-distribute by replication
-;
-insert into TF_JKH_SNAPSHOT
-(
-   SNAPSHOT_DT           /* 名单快照日 */
-)
-select
-  coalesce(
-      max(case when S.DW_SNSH_DT = CAST('${v_Trx_Dt}' AS DATE) then S.DW_SNSH_DT end)
-     ,max(case when S.DW_SNSH_DT = CAST(date_trunc('month', CAST('${v_Trx_Dt}' AS DATE) + interval '1 month') AS DATE) - 1
-               then S.DW_SNSH_DT end)
-     ,case when max(S.DW_SNSH_DT) > CAST('${v_Trx_Dt}' AS DATE) then min(S.DW_SNSH_DT) else max(S.DW_SNSH_DT) end
-  ) as SNAPSHOT_DT          /* 名单快照日 */
-from ${AALC_DATA}.AALC_R_RM_SFL_CM_BAS_INFO as S    /* 金葵花客户经理名单 */
-where S.CLB_IND = '3'
-;
-
-
--- -----------------------------------------------------------------------------
 -- 1.2 客户经理名单快照（分行取 FRS_BBK_ORG_ID，支行取 BRN_ORG_ID）
---     一名客户经理一行，机构名称/岗位重复取值用 min 取稳定值
+--     每个重跑日按 DW_SNSH_DT 精确匹配名单；每天每名客户经理唯一，不聚合、不回退快照
 -- -----------------------------------------------------------------------------
 drop table if exists TF_JKH_ROSTER;
 create temporary table TF_JKH_ROSTER    /* 金葵花客户经理名单快照 */
 (
- CM_ID                 VARCHAR(200)   NOT NULL    /* 客户经理编号（SAP号），对应 jkh_user_inf.user_id */
+ REPLAY_SEQ            INTEGER        NOT NULL    /* 重跑序号 */
+,CM_ID                 VARCHAR(200)   NOT NULL    /* 客户经理编号（SAP号），对应 jkh_user_inf.user_id */
 ,CM_NM                 VARCHAR(500)               /* 客户经理姓名 */
 ,PST_LVL               VARCHAR(100)               /* 岗位定级 */
 ,BRN_ORG_ID            VARCHAR(100)               /* 网点号 */
@@ -168,7 +136,8 @@ distribute by replication
 ;
 insert into TF_JKH_ROSTER
 (
-   CM_ID                 /* 客户经理编号 */
+   REPLAY_SEQ            /* 重跑序号 */
+  ,CM_ID                 /* 客户经理编号 */
   ,CM_NM                 /* 客户经理姓名 */
   ,PST_LVL               /* 岗位定级 */
   ,BRN_ORG_ID            /* 网点号 */
@@ -177,75 +146,20 @@ insert into TF_JKH_ROSTER
   ,FRS_BBK_ORG_NM        /* 一级分行名称 */
 )
 select
-  S.CM_ID as CM_ID                       /* 客户经理编号 */
-  ,min(S.CM_NM) as CM_NM                 /* 客户经理姓名 */
-  ,min(S.PST_LVL) as PST_LVL             /* 岗位定级 */
-  ,min(S.BRN_ORG_ID) as BRN_ORG_ID       /* 网点号 */
-  ,min(S.BRN_ORG_NM) as BRN_ORG_NM       /* 网点名称 */
-  ,min(S.FRS_BBK_ORG_ID) as FRS_BBK_ORG_ID    /* 一级分行号 */
-  ,min(S.FRS_BBK_ORG_NM) as FRS_BBK_ORG_NM    /* 一级分行名称 */
+  CAL.REPLAY_SEQ as REPLAY_SEQ          /* 重跑序号 */
+  ,S.CM_ID as CM_ID                       /* 客户经理编号 */
+  ,S.CM_NM as CM_NM                 /* 客户经理姓名 */
+  ,S.PST_LVL as PST_LVL             /* 岗位定级 */
+  ,S.BRN_ORG_ID as BRN_ORG_ID       /* 网点号 */
+  ,S.BRN_ORG_NM as BRN_ORG_NM       /* 网点名称 */
+  ,S.FRS_BBK_ORG_ID as FRS_BBK_ORG_ID    /* 一级分行号 */
+  ,S.FRS_BBK_ORG_NM as FRS_BBK_ORG_NM    /* 一级分行名称 */
 from ${AALC_DATA}.AALC_R_RM_SFL_CM_BAS_INFO as S    /* 金葵花客户经理名单 */
-inner join TF_JKH_SNAPSHOT as P
-        on S.DW_SNSH_DT = P.SNAPSHOT_DT
+inner join TF_CALENDAR as CAL
+        on S.DW_SNSH_DT = CAL.REPLAY_DT
 where S.CLB_IND = '3'
   and S.CM_ID is not null
   and trim(S.CM_ID) <> ''
-group by S.CM_ID
-;
-
-
--- -----------------------------------------------------------------------------
--- 1.3 分行名称（对应接口 permissions 的 MIN(first_bbk_nm)）
--- -----------------------------------------------------------------------------
-drop table if exists TF_BBK_NAME;
-create temporary table TF_BBK_NAME    /* 分行名称 */
-(
- FRS_BBK_ORG_ID        VARCHAR(200)   NOT NULL    /* 一级分行号 */
-,FRS_BBK_ORG_NM        VARCHAR(500)               /* 一级分行名称 */
-)
-WITH (orientation = column, colversion = 2.0, compression = middle)
-on commit preserve rows
-distribute by replication
-;
-insert into TF_BBK_NAME
-(
-   FRS_BBK_ORG_ID        /* 一级分行号 */
-  ,FRS_BBK_ORG_NM        /* 一级分行名称 */
-)
-select
-  coalesce(S.FRS_BBK_ORG_ID, '') as FRS_BBK_ORG_ID    /* 一级分行号 */
-  ,min(S.FRS_BBK_ORG_NM) as FRS_BBK_ORG_NM          /* 一级分行名称 */
-from TF_JKH_ROSTER as S    /* 金葵花客户经理名单快照 */
-group by coalesce(S.FRS_BBK_ORG_ID, '')
-;
-
-
--- -----------------------------------------------------------------------------
--- 1.4 网点名称（对应接口 permissions 的 MIN(org_nm)，按 分行+网点 联合键）
--- -----------------------------------------------------------------------------
-drop table if exists TF_ORG_NAME;
-create temporary table TF_ORG_NAME    /* 网点名称 */
-(
- FRS_BBK_ORG_ID        VARCHAR(200)   NOT NULL    /* 一级分行号 */
-,BRN_ORG_ID            VARCHAR(100)   NOT NULL    /* 网点号 */
-,BRN_ORG_NM            VARCHAR(500)               /* 网点名称 */
-)
-WITH (orientation = column, colversion = 2.0, compression = middle)
-on commit preserve rows
-distribute by replication
-;
-insert into TF_ORG_NAME
-(
-   FRS_BBK_ORG_ID        /* 一级分行号 */
-  ,BRN_ORG_ID            /* 网点号 */
-  ,BRN_ORG_NM            /* 网点名称 */
-)
-select
-  coalesce(S.FRS_BBK_ORG_ID, '') as FRS_BBK_ORG_ID    /* 一级分行号 */
-  ,coalesce(S.BRN_ORG_ID, '') as BRN_ORG_ID           /* 网点号 */
-  ,min(S.BRN_ORG_NM) as BRN_ORG_NM                    /* 网点名称 */
-from TF_JKH_ROSTER as S    /* 金葵花客户经理名单快照 */
-group by coalesce(S.FRS_BBK_ORG_ID, ''), coalesce(S.BRN_ORG_ID, '')
 ;
 
 
@@ -305,63 +219,6 @@ select 'ask_plan' as JOB_TYPE           /* 主动提问(名单+方案) */
 union all
 select 'push_other' as JOB_TYPE         /* 推送(非名单方案) */
 ;
-
-
--- -----------------------------------------------------------------------------
--- 1.7 序号辅助表（技能ID按逗号拆分用，替代 Hive 的 explode + split）
---     高斯（GaussDB(DWS)）对 FROM 里的 set-returning 函数 / LATERAL 支持与 PostgreSQL
---     不一致，cross join lateral regexp_split_to_table(...) 会报语法错误，所以用
---     「数字表 + split_part(字符串, ',', N)」实现同一件事：不依赖 SRF、不依赖 LATERAL、
---     也不用递归 CTE（用 10 行数字表三次笛卡尔积造出 1..1000 再取前 400 行）。
---     为什么是 400：SKILL_IDS 是 VARCHAR(800)，按逗号拆分后 token 数远小于 400；
---     若现场可能出现更多技能，把下面的 400（两处）一起调大即可。
--- -----------------------------------------------------------------------------
-drop table if exists TF_DIGIT;
-create temporary table TF_DIGIT    /* 个位数字表 1..10 */
-(
- N                     INTEGER        NOT NULL    /* 数字 1..10 */
-)
-WITH (orientation = column, colversion = 2.0, compression = middle)
-on commit preserve rows
-distribute by replication
-;
-insert into TF_DIGIT
-(
-   N                     /* 数字 1..10 */
-)
-select 1 as N    /* 1 */
-union all select 2    /* 2 */
-union all select 3    /* 3 */
-union all select 4    /* 4 */
-union all select 5    /* 5 */
-union all select 6    /* 6 */
-union all select 7    /* 7 */
-union all select 8    /* 8 */
-union all select 9    /* 9 */
-union all select 10   /* 10 */
-;
-
-
-drop table if exists TF_SEQ;
-create temporary table TF_SEQ    /* 序号辅助表 1..400 */
-(
- N                     INTEGER        NOT NULL    /* 序号 1..400 */
-)
-WITH (orientation = column, colversion = 2.0, compression = middle)
-on commit preserve rows
-distribute by replication
-;
-insert into TF_SEQ
-(
-   N                     /* 序号 1..400 */
-)
-select A.N * 100 + B.N * 10 + C.N - 110 as N    /* 三位数字组合，取值 1..1000 */
-from TF_DIGIT as A    /* 百位 */
-cross join TF_DIGIT as B    /* 十位 */
-cross join TF_DIGIT as C    /* 个位 */
-where A.N * 100 + B.N * 10 + C.N - 110 <= 400
-;
-
 
 
 -- =============================================================================
@@ -450,12 +307,8 @@ where S.TRACE_ID is not null
 -- -----------------------------------------------------------------------------
 -- 2.4 合规推送任务 × 统计技能（接口 push_job_scope）
 --     条件：job 未删除、未标记删除、skill_ids 非空，且命中的技能在统计目录内
---     技能拆列：Hive 用 lateral view explode(split(skill_ids, ','))；
---     高斯（GaussDB(DWS)）对 FROM 里的 set-returning 函数 / LATERAL 支持与 PostgreSQL 不一致，
---     直接写 cross join lateral regexp_split_to_table(...) 会报语法错误，因此改成
---     「序号辅助表 TF_SEQ + split_part(skill_ids, ',', N)」：
---       第 N 个技能 = trim(split_part(skill_ids, ',', N))，N 从 1 取到「逗号个数 + 1」。
---     语义与 explode 完全一致（按逗号精确切分、不忽略空格，空元素由技能目录 join 过滤）。
+--     先用 ANY 判断任务是否命中统计目录，再展开该任务全部技能（按任务口径保留）。
+--     DISTINCT 消除多个目录技能命中同一任务造成的重复。
 -- -----------------------------------------------------------------------------
 drop table if exists TF_PUSH_JOB_SKILL;
 create temporary table TF_PUSH_JOB_SKILL    /* 推送任务×统计技能 */
@@ -483,14 +336,12 @@ select distinct
   ,J.ID as JOB_ID                   /* 任务ID */
   ,J.TENANT_ID as OWNER_CM_ID       /* 任务归属人 */
   ,J.STATUS as JOB_STATUS    /* 任务当前状态（源字段已为小写） */
-  ,trim(split_part(J.SKILL_IDS, ',', S.N)) as SKILL_ID    /* 任务绑定的统计技能ID（第 N 个） */
+  ,unnest(string_to_array(J.SKILL_IDS, ',')) as SKILL_ID    /* 任务绑定的统计技能ID（第 N 个） */
 from ${NDS_DATA}.NLQ13_SWE_CRON_JOBS as J    /* 定时任务定义 */
-inner join TF_SEQ as S    /* 序号辅助表 1..400 */
-        on S.N <= length(J.SKILL_IDS) - length(replace(J.SKILL_IDS, ',', '')) + 1    /* N 不超过技能个数 */
 inner join TF_SKILL_CATALOG as K    /* 技能目录（纳入统计的市场技能） */
         on K.SOURCE_ID = J.SOURCE_ID
-       and K.SKILL_ID = trim(split_part(J.SKILL_IDS, ',', S.N))
-where J.DELETED_AT is null
+       and K.SKILL_ID = ANY(string_to_array(J.SKILL_IDS, ','))
+where (J.DELETED_AT = '0001-01-01 00:00:00' or J.DELETED_AT is null)
   and J.STATUS <> 'deleted'
   and J.SKILL_IDS is not null
   and trim(J.SKILL_IDS) <> ''
@@ -609,8 +460,10 @@ left join TF_TRACE_SUB as TS    /* 存在子任务的 trace */
        on TS.TRACE_ID = E.TRACE_ID
 left join TF_JKH_ROSTER as R    /* 金葵花客户经理名单快照（执行人） */
        on R.CM_ID = E.TENANT_ID
+      and R.REPLAY_SEQ = CAL.REPLAY_SEQ
 left join TF_JKH_ROSTER as R2   /* 金葵花客户经理名单快照（任务归属人） */
        on R2.CM_ID = J.OWNER_CM_ID
+      and R2.REPLAY_SEQ = CAL.REPLAY_SEQ
 where (TS.TRACE_ID is not null
        or (E.STATUS = 'success' and E.ASYNC_STATUS = 'success'))
 ;
@@ -735,71 +588,14 @@ from TF_PUSH_EXEC_SKILL as E    /* 推送任务集合（执行×统计技能） 
 inner join TF_SUBTASK_CUST as S    /* 子任务里的方案客户 */
         on S.TRACE_ID = E.TRACE_ID
 where E.JOB_TYPE = 'push_plan'
+  and E.EXEC_IN_ROSTER = 1    /* 仅统计命中对应重跑日名单的执行人 */
 ;
 
 
 -- -----------------------------------------------------------------------------
--- 2.9 合格主动提问 Span（接口 ask_qualifier，不限制时间）
---     条件：trace 非空、技能非空、有同 trace 子任务、历史执行里不存在同 trace 的执行；
---     同时带上提问人名单信息与“技能是否在统计目录内”标记。
---     不加时间窗是因为接口的主动点击关联也不限制 Span 生成时间，时间窗在 2.10 再收窄。
--- -----------------------------------------------------------------------------
-drop table if exists TF_ASK_SPAN;
-create temporary table TF_ASK_SPAN    /* 合格主动提问 Span（不含时间窗） */
-(
- SOURCE_ID             VARCHAR(256)   NOT NULL    /* 来源标识 */
-,TRACE_ID              VARCHAR(256)   NOT NULL    /* trace_id */
-,SKILL_ID              VARCHAR(512)   NOT NULL    /* Span技能ID */
-,CM_ID                 VARCHAR(256)               /* 提问人 */
-,START_TIME            TIMESTAMP                  /* Span开始时间 */
-,IN_STAT_CATALOG       INTEGER                    /* 技能是否在统计目录内：1=在目录 */
-,FRS_BBK_ORG_ID        VARCHAR(200)               /* 一级分行号 */
-,BRN_ORG_ID            VARCHAR(100)               /* 网点号 */
-)
-WITH (orientation = column, colversion = 2.0, compression = middle)
-on commit preserve rows
-distribute by hash (SOURCE_ID, TRACE_ID)
-;
-insert into TF_ASK_SPAN
-(
-   SOURCE_ID             /* 来源标识 */
-  ,TRACE_ID              /* trace_id */
-  ,SKILL_ID              /* Span技能ID */
-  ,CM_ID                 /* 提问人 */
-  ,START_TIME            /* Span开始时间 */
-  ,IN_STAT_CATALOG       /* 技能是否在统计目录内 */
-  ,FRS_BBK_ORG_ID        /* 一级分行号 */
-  ,BRN_ORG_ID            /* 网点号 */
-)
-select distinct
-  SP.SOURCE_ID as SOURCE_ID         /* 来源标识 */
-  ,SP.TRACE_ID as TRACE_ID          /* trace_id */
-  ,trim(SP.SKILL_ID) as SKILL_ID    /* Span技能ID */
-  ,SP.USER_ID as CM_ID              /* 提问人 */
-  ,SP.START_TIME as START_TIME      /* Span开始时间 */
-  ,case when K.SKILL_ID is not null then 1 else 0 end as IN_STAT_CATALOG    /* 技能是否在统计目录内 */
-  ,coalesce(R.FRS_BBK_ORG_ID, '') as FRS_BBK_ORG_ID    /* 一级分行号 */
-  ,coalesce(R.BRN_ORG_ID, '') as BRN_ORG_ID            /* 网点号 */
-from ${NDS_DATA}.NLQ13_SWE_TRACING_SPANS as SP    /* 追踪 Span（主动提问） */
-inner join TF_JKH_ROSTER as R    /* 金葵花客户经理名单快照 */
-        on R.CM_ID = SP.USER_ID
-inner join TF_TRACE_SUB as TS    /* 存在子任务的 trace */
-        on TS.TRACE_ID = SP.TRACE_ID
-left join TF_TRACE_EXEC as TE    /* 存在执行记录的 trace */
-       on TE.TRACE_ID = SP.TRACE_ID
-left join TF_SKILL_CATALOG as K    /* 技能目录（纳入统计的市场技能） */
-       on K.SOURCE_ID = SP.SOURCE_ID
-      and K.SKILL_ID = trim(SP.SKILL_ID)
-where SP.TRACE_ID <> ''
-  and SP.SKILL_ID is not null
-  and trim(SP.SKILL_ID) <> ''
-  and TE.TRACE_ID is null
-;
-
-
--- -----------------------------------------------------------------------------
--- 2.10 统计区间内的主动提问（Span × 技能）：接口 ask 子查询
---      重跑：关联第 1.0 段日历，取「当月 1 号 ~ 重跑日」，每个重跑日各出一份
+-- 2.9 合格主动提问（合并原 Span 与 Trace 两步）
+--     入口按日历限制 START_TIME，直接匹配统计技能及重跑日名单。
+--     保留同 trace 有子任务、无定时执行记录的条件；点击复用同一重跑日集合。
 -- -----------------------------------------------------------------------------
 drop table if exists TF_ASK_TRACE;
 create temporary table TF_ASK_TRACE    /* 主动提问任务（Span×技能） */
@@ -810,7 +606,6 @@ create temporary table TF_ASK_TRACE    /* 主动提问任务（Span×技能） *
 ,TRACE_ID              VARCHAR(256)   NOT NULL    /* trace_id */
 ,SKILL_ID              VARCHAR(512)   NOT NULL    /* Span技能ID */
 ,CM_ID                 VARCHAR(256)               /* 提问人 */
-,IN_STAT_CATALOG       INTEGER                    /* 技能是否在统计目录内 */
 ,FRS_BBK_ORG_ID        VARCHAR(200)               /* 一级分行号 */
 ,BRN_ORG_ID            VARCHAR(100)               /* 网点号 */
 )
@@ -826,24 +621,36 @@ insert into TF_ASK_TRACE
   ,TRACE_ID              /* trace_id */
   ,SKILL_ID              /* Span技能ID */
   ,CM_ID                 /* 提问人 */
-  ,IN_STAT_CATALOG       /* 技能是否在统计目录内 */
   ,FRS_BBK_ORG_ID        /* 一级分行号 */
   ,BRN_ORG_ID            /* 网点号 */
 )
 select distinct
   CAL.REPLAY_SEQ as REPLAY_SEQ      /* 重跑序号 */
-  ,A.SOURCE_ID as SOURCE_ID         /* 来源标识 */
+  ,SP.SOURCE_ID as SOURCE_ID        /* 来源标识 */
   ,'ask_plan' as JOB_TYPE           /* 任务类型 */
-  ,A.TRACE_ID as TRACE_ID           /* trace_id */
-  ,A.SKILL_ID as SKILL_ID           /* Span技能ID */
-  ,A.CM_ID as CM_ID                 /* 提问人 */
-  ,A.IN_STAT_CATALOG as IN_STAT_CATALOG    /* 技能是否在统计目录内 */
-  ,A.FRS_BBK_ORG_ID as FRS_BBK_ORG_ID      /* 一级分行号 */
-  ,A.BRN_ORG_ID as BRN_ORG_ID              /* 网点号 */
-from TF_ASK_SPAN as A    /* 合格主动提问 Span */
-inner join TF_CALENDAR as CAL    /* 重跑日历 */
-        on A.START_TIME >= CAST(CAL.MTH_START_DT AS TIMESTAMP)
-       and A.START_TIME <  CAST(CAL.NEXT_DT AS TIMESTAMP)
+  ,SP.TRACE_ID as TRACE_ID          /* trace_id */
+  ,trim(SP.SKILL_ID) as SKILL_ID     /* Span技能ID */
+  ,SP.USER_ID as CM_ID              /* 提问人 */
+  ,coalesce(R.FRS_BBK_ORG_ID, '') as FRS_BBK_ORG_ID
+  ,coalesce(R.BRN_ORG_ID, '') as BRN_ORG_ID
+from ${NDS_DATA}.NLQ13_SWE_TRACING_SPANS as SP    /* 追踪 Span（主动提问） */
+inner join TF_CALENDAR as CAL    /* 重跑日历：当月 1 号至重跑日 */
+        on SP.START_TIME >= CAST(CAL.MTH_START_DT AS TIMESTAMP)
+       and SP.START_TIME <  CAST(CAL.NEXT_DT AS TIMESTAMP)
+inner join TF_JKH_ROSTER as R    /* 金葵花客户经理名单快照 */
+        on R.CM_ID = SP.USER_ID
+       and R.REPLAY_SEQ = CAL.REPLAY_SEQ
+inner join TF_TRACE_SUB as TS    /* 存在子任务的 trace */
+        on TS.TRACE_ID = SP.TRACE_ID
+left join TF_TRACE_EXEC as TE    /* 存在执行记录的 trace */
+       on TE.TRACE_ID = SP.TRACE_ID
+inner join TF_SKILL_CATALOG as K    /* 技能目录（纳入统计的市场技能） */
+       on K.SOURCE_ID = SP.SOURCE_ID
+      and K.SKILL_ID = trim(SP.SKILL_ID)
+where SP.TRACE_ID <> ''
+  and SP.SKILL_ID is not null
+  and trim(SP.SKILL_ID) <> ''
+  and TE.TRACE_ID is null
 ;
 
 
@@ -859,7 +666,6 @@ create temporary table TF_ASK_CUST    /* 主动提问方案客户（Span×技能
 ,SKILL_ID              VARCHAR(512)   NOT NULL    /* 技能ID */
 ,CUSTUID               VARCHAR(256)   NOT NULL    /* 任务中客户UID */
 ,CM_ID                 VARCHAR(256)               /* 提问人 */
-,IN_STAT_CATALOG       INTEGER                    /* 技能是否在统计目录内 */
 ,FRS_BBK_ORG_ID        VARCHAR(200)               /* 一级分行号 */
 ,BRN_ORG_ID            VARCHAR(100)               /* 网点号 */
 )
@@ -875,7 +681,6 @@ insert into TF_ASK_CUST
   ,SKILL_ID              /* 技能ID */
   ,CUSTUID               /* 任务中客户UID */
   ,CM_ID                 /* 提问人 */
-  ,IN_STAT_CATALOG       /* 技能是否在统计目录内 */
   ,FRS_BBK_ORG_ID        /* 一级分行号 */
   ,BRN_ORG_ID            /* 网点号 */
 )
@@ -886,7 +691,6 @@ select distinct
   ,A.SKILL_ID as SKILL_ID           /* 技能ID */
   ,S.CUSTUID as CUSTUID             /* 任务中客户UID */
   ,A.CM_ID as CM_ID                 /* 提问人 */
-  ,A.IN_STAT_CATALOG as IN_STAT_CATALOG    /* 技能是否在统计目录内 */
   ,A.FRS_BBK_ORG_ID as FRS_BBK_ORG_ID      /* 一级分行号 */
   ,A.BRN_ORG_ID as BRN_ORG_ID              /* 网点号 */
 from TF_ASK_TRACE as A    /* 主动提问任务（Span×技能） */
@@ -955,6 +759,7 @@ inner join TF_JKH_ROSTER as R    /* 金葵花客户经理名单快照（点击�
         on R.CM_ID = C.USER_ID
 inner join TF_CALENDAR as CAL    /* 重跑日历 */
         on C.CLICKED_AT >= CAST(CAL.MTH_START_DT AS TIMESTAMP)
+       and R.REPLAY_SEQ = CAL.REPLAY_SEQ
        and C.CLICKED_AT <  CAST(CAST('${v_Trx_Dt}' AS DATE) + 1 AS TIMESTAMP)
 where C.TRACE_ID is not null
   and C.TRACE_ID <> ''
@@ -1108,10 +913,10 @@ select distinct
   ,C.TEMPLATE_TYPE as TEMPLATE_TYPE                 /* 模板类型 */
   ,C.BUTTON_TYPE as BUTTON_TYPE                     /* 按钮类型 */
 from TF_CLICK_EVENT as C    /* 客户点击基础集合 */
-inner join TF_ASK_SPAN as A    /* 合格主动提问 Span */
+inner join TF_ASK_TRACE as A    /* 合格主动提问 Span */
         on A.SOURCE_ID = C.SOURCE_ID
        and A.TRACE_ID = C.TRACE_ID
-       and A.IN_STAT_CATALOG = 1
+       and A.REPLAY_SEQ = C.REPLAY_SEQ
 ;
 
 
@@ -1267,10 +1072,10 @@ select distinct
   ,C.FRS_BBK_ORG_ID as FRS_BBK_ORG_ID               /* 点击人一级分行号 */
   ,C.BRN_ORG_ID as BRN_ORG_ID                       /* 点击人网点号 */
 from TF_CLICK_CLS as C    /* 点击事件（已判定任务类型） */
-inner join TF_ASK_SPAN as A    /* 合格主动提问 Span */
+inner join TF_ASK_TRACE as A    /* 合格主动提问 Span */
         on A.SOURCE_ID = C.SOURCE_ID
        and A.TRACE_ID = C.TRACE_ID
-       and A.IN_STAT_CATALOG = 1
+       and A.REPLAY_SEQ = C.REPLAY_SEQ
 where C.JOB_TYPE = 'ask_plan'
 ;
 
@@ -1316,18 +1121,17 @@ create temporary table TF_RULE_ASK_METRIC
 (
  METRIC_NM             VARCHAR(64)   NOT NULL
 ,KEY_KIND              VARCHAR(16)   NOT NULL
-,NEED_CATALOG          INTEGER       NOT NULL
 )
 WITH (orientation = column, colversion = 2.0, compression = middle)
 on commit preserve rows
 distribute by replication
 ;
 insert into TF_RULE_ASK_METRIC
-select 'SKILL_CNT',       'SKILL', 1
+select 'SKILL_CNT',       'SKILL'
 union all
-select 'SUC_EXECUTE_JOB', 'TRACE', 0
+select 'SUC_EXECUTE_JOB', 'TRACE'
 union all
-select 'READ_TASKS',      'TRACE', 0
+select 'READ_TASKS',      'TRACE'
 ;
 
 -- 3.0.3 点击指标规则；一个 insight/phone 点击同时生成“客户数”和“次数”两类指标
@@ -1429,7 +1233,7 @@ from TF_PUSH_JOB_SKILL J
 inner join TF_JKH_ROSTER R
         on R.CM_ID = J.OWNER_CM_ID
 inner join TF_CALENDAR CAL
-        on 1 = 1
+        on CAL.REPLAY_SEQ = R.REPLAY_SEQ
 inner join TF_TASK_TYPE TT
         on TT.JOB_TYPE in ('push_plan', 'push_other')
 where J.JOB_STATUS in ('active', 'paused')
@@ -1463,11 +1267,10 @@ select
  ,A.JOB_TYPE
  ,R.METRIC_NM
  ,case when R.KEY_KIND = 'SKILL' then A.SKILL_ID else A.TRACE_ID end
- ,A.IN_STAT_CATALOG
+ ,1
 from TF_ASK_TRACE A
 inner join TF_RULE_ASK_METRIC R
-        on R.NEED_CATALOG = 0
-        or A.IN_STAT_CATALOG = 1
+        on 1 = 1
 
 union all
 
@@ -1482,7 +1285,7 @@ select
  ,A.JOB_TYPE
  ,'RECOMMENDED_CUSTOMERS'
  ,A.CUSTUID
- ,A.IN_STAT_CATALOG
+ ,1
 from TF_ASK_CUST A
 
 union all
@@ -1968,13 +1771,23 @@ select
 from TF_RPT R
 inner join TF_CALENDAR CAL
         on CAL.REPLAY_SEQ = R.REPLAY_SEQ
-left join TF_BBK_NAME NB
+left join (
+    select distinct REPLAY_SEQ, coalesce(FRS_BBK_ORG_ID, '') as FRS_BBK_ORG_ID, FRS_BBK_ORG_NM
+    from TF_JKH_ROSTER
+) NB
        on NB.FRS_BBK_ORG_ID = R.K_FRS_BBK_ORG_ID
-left join TF_ORG_NAME NO
+      and NB.REPLAY_SEQ = R.REPLAY_SEQ
+left join (
+    select distinct REPLAY_SEQ, coalesce(FRS_BBK_ORG_ID, '') as FRS_BBK_ORG_ID,
+           coalesce(BRN_ORG_ID, '') as BRN_ORG_ID, BRN_ORG_NM
+    from TF_JKH_ROSTER
+) NO
        on NO.FRS_BBK_ORG_ID = R.K_FRS_BBK_ORG_ID
+      and NO.REPLAY_SEQ = R.REPLAY_SEQ
       and NO.BRN_ORG_ID = R.K_BRN_ORG_ID
 left join TF_JKH_ROSTER RK
        on RK.CM_ID = R.K_CM_ID
+      and RK.REPLAY_SEQ = R.REPLAY_SEQ
 left join TF_SKILL_CATALOG NK
        on NK.SOURCE_ID = R.SOURCE_ID
       and NK.SKILL_ID = R.K_SKILL

@@ -14,7 +14,7 @@
 | --- | --- |
 | `task_type_report_tables.sql` | 目标表 `P_AALC.AALC_RM_TASK_TYPE_RPT` 的建表语句，首次部署执行一次 |
 | `task_type_report_daily.sql` | 每日跑数脚本，七种组合写入同一张表；一次重写近 7 天 + 当天共 8 个分区 |
-| `task_type_report_tdsql.sql` | 出仓到 TDSQL 的建表与装载脚本，配套接口 `/api/monitor/report/task-type*` |
+| `task_type_report_tdsql.sql` | 出仓到 TDSQL 的建表与装载脚本，配套接口 `/api/monitor/cron/report/task-type*` |
 
 ```bash
 # 跑数日期=2026-09-17：写入 2026-09-10 ~ 2026-09-17 共 8 个分区

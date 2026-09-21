@@ -2,7 +2,7 @@
 -- 金葵花任务类型报表 —— TDSQL 落盘表结构（MySQL 兼容）
 --
 -- 本文件只描述表结构：数据由现场作业自行写入，仓库不提供装载脚本。
--- 消费方：/api/monitor/report/task-type（查询）、/export、/options、/dates、/status
+-- 消费方：/api/monitor/cron/report/task-type（查询）、/export、/options、/dates、/status
 --         代码：routers/task_type_snapshot.py + services/report/task_type_snapshot.py
 -- 权威结构：src/monitor/app/database/schema.py（服务启动会自动建表，两边必须逐字一致）
 --
@@ -19,7 +19,7 @@
         prt_dt            DATE NOT NULL COMMENT '数据日期(高斯 DW_DAT_DT)，等于接口 end_date 与统计截止日',
         source_id         VARCHAR(100) NOT NULL COMMENT '来源标识(高斯 SOURCE_ID)',
         rpt_combo         VARCHAR(32) NOT NULL COMMENT '报表组合: overall/branch/org/manager/branch_skill/org_skill/manager_skill',
-        task_type         VARCHAR(16) NOT NULL COMMENT '任务类型(高斯 JOB_TYPE): push_plan/ask_plan/push_other',
+        task_type         VARCHAR(16) NOT NULL COMMENT '任务类型码值: push_plan/ask_plan/push_other（高斯 JOB_TYPE 现在是中文，装载作业按 推送→push_plan、主动→ask_plan、推送非→push_other 映射后写入）',
         first_bbk_id      VARCHAR(200) NOT NULL DEFAULT '' COMMENT '一级分行号(FRS_BBK_ORG_ID)，不适用为 ALL、名单缺机构号为空串',
         org_id            VARCHAR(100) NOT NULL DEFAULT '' COMMENT '网点号(BRN_ORG_ID)，不适用为 ALL',
         user_id           VARCHAR(200) NOT NULL DEFAULT '' COMMENT '客户经理编号(CM_ID)，不适用为 ALL',
@@ -29,7 +29,7 @@
         user_name         VARCHAR(500) DEFAULT '' COMMENT '客户经理姓名(CM_NM)',
         pst_lvl           VARCHAR(100) DEFAULT '' COMMENT '岗位定级(PST_LVL)',
         cn_name           VARCHAR(1000) DEFAULT '' COMMENT '技能中文名(SKILL_NM)',
-        task_type_name    VARCHAR(100) DEFAULT '' COMMENT '任务类型名称(JOB_TYPE_NM)',
+        task_type_name    VARCHAR(100) DEFAULT '' COMMENT '任务类型名称（高斯 JOB_TYPE 原值，如 推送/主动/推送非）；为空时接口按 task_type 回退映射',
         skill_cnt         BIGINT NOT NULL DEFAULT 0 COMMENT '技能数(SKILL_CNT)',
         active_manager_cnt BIGINT DEFAULT NULL COMMENT '活跃客户经理数(ACTIVE_MANAGER_CNT)，仅总体/分行/支行维度有值',
         active_job_cnt    BIGINT DEFAULT NULL COMMENT '当前活跃任务数(ACTIVE_JOB_CNT)，仅客户经理维度有值',
