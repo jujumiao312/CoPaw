@@ -48,7 +48,7 @@ from .task_type_report import ReportRoute, report_errors
 # 挂回 /monitor/cron 前缀：网关只把 /api/monitor/cron/* 转发给本服务，
 # 独立前缀 /monitor/report 会 404（旧在线接口同样在 cron 前缀下）。
 router = APIRouter(
-    prefix="/monitor/cron/report", tags=["report"], route_class=ReportRoute
+    prefix="/monitor/report", tags=["report"], route_class=ReportRoute
 )
 REPORT_TIMEOUT_SECONDS = 50
 MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
