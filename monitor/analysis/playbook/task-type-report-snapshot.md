@@ -77,7 +77,7 @@
   因此接口对名单有实时依赖，这不是漏改；
 - 技能明细各列仍不可相加，汇总取不带 `_skill` 的组合；
 - 经理汇总/明细的 `active_task_count`、`paused_task_count` 映射现有 `active_job_cnt`、`paused_job_cnt`，保留 NULL；接口与导出均以两项任务数替换人数指标，其他维度任务数返回 null。
-- `skill_detail=true` 在 SQL 中过滤 `skill_cnt > 0`，零值与 NULL 行不返回，分页计数和导出共用该条件；支行/经理汇总也使用该过滤；仅总体/分行汇总保留技能数为 0 的行。技能明细不读取技能数指标，响应 skill_count=null。
+- `skill_detail=true` 在 SQL 中过滤 `skill_cnt > 0`，零值与 NULL 行不返回，分页计数和导出共用该条件；分行/支行/经理汇总也使用该过滤；仅总体汇总保留技能数为 0 的行。技能明细不读取技能数指标，响应 skill_count=null。
 - `overall` 组合不支持任何机构筛选（落盘表没有“某分行的总体”这一行）。
 
 ## 5. 排查入口

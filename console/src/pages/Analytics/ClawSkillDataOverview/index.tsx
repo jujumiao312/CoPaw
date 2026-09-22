@@ -63,6 +63,15 @@ const metrics = [
   ["click_to_phone_rate", "点击跳转电访客户数覆盖率"],
   ["phone_count", "点击去电访总次数"],
 ] as const;
+const METRIC_COLUMN_MIN_WIDTH = 96;
+const METRIC_COLUMN_MAX_WIDTH = 150;
+/** 指标列按列名长度取宽，短列名不占位，长列名允许表头折行。 */
+function metricColumnWidth(title: string) {
+  return Math.min(
+    METRIC_COLUMN_MAX_WIDTH,
+    Math.max(METRIC_COLUMN_MIN_WIDTH, title.length * 12 + 20),
+  );
+}
 function metricColumns(params: ReportParams): ColumnsType<ReportRow> {
   const leadingMetrics =
     params.group_by === "manager"
@@ -76,7 +85,7 @@ function metricColumns(params: ReportParams): ColumnsType<ReportRow> {
   return [...leadingMetrics, ...metrics.slice(2)].map(([key, title]) => ({
     title,
     dataIndex: key,
-    width: 148,
+    width: metricColumnWidth(title),
     align: "right",
     render: (value: number | null) =>
       value == null
@@ -135,6 +144,11 @@ function ReportTable({
       row.skill_id,
       row.task_type,
     ]);
+  const tableWidth = columns.reduce(
+    (total, column) =>
+      total + (typeof column.width === "number" ? column.width : 0),
+    0,
+  );
   return (
     <>
       <div className={styles.reportMeta}>
@@ -190,8 +204,7 @@ function ReportTable({
             : ""
         }
         scroll={{
-          x:
-            params.group_by === "manager" && !params.skill_detail ? 2350 : 2050,
+          x: tableWidth,
           y: "min(720px, max(320px, calc(100vh - 440px)))",
         }}
         onScroll={(event) => {
@@ -211,17 +224,11 @@ function ReportTable({
         }}
       />
       <div className={styles.tableFooter} aria-live="polite">
-        {report.hasMore ? (
-          <Button
-            type="text"
-            onClick={() => void report.loadMore()}
-            loading={report.loading}
-          >
-            {report.error ? "重试加载" : "向下滚动加载更多"}
-          </Button>
-        ) : (
-          <span>{report.loading ? "正在加载报表…" : "已显示全部结果"}</span>
-        )}
+        {report.loading
+          ? "正在加载报表…"
+          : report.hasMore
+          ? null
+          : "已显示全部结果"}
       </div>
     </>
   );
@@ -248,16 +255,16 @@ function SkillDetails({
     {
       title: "技能名称",
       dataIndex: "cn_name",
-      width: 240,
+      width: 200,
       fixed: "left",
-      render: (_, item) => (
-        <Tooltip title={`${item.cn_name || item.skill_id} · ${item.skill_id}`}>
-          <span className={styles.skillName}>
-            {item.cn_name || item.skill_id || "未知技能"}
-            <small>{item.skill_id}</small>
-          </span>
-        </Tooltip>
-      ),
+      render: (_, item) => {
+        const name = item.cn_name || item.skill_id || "未知技能";
+        return (
+          <Tooltip title={name}>
+            <span className={styles.skillName}>{name}</span>
+          </Tooltip>
+        );
+      },
     },
     ...metricColumns(detailParams),
   ];
@@ -310,7 +317,7 @@ function ReportResults({ params }: { params: ReportParams }) {
   const columns: ColumnsType<ReportRow> = [
     {
       title: dimensionLabel,
-      width: 240,
+      width: 160,
       fixed: "left",
       ellipsis: true,
       render: (_, row) => entityName(row, params.group_by),
@@ -319,14 +326,14 @@ function ReportResults({ params }: { params: ReportParams }) {
       ? [
           {
             title: "所属分行",
-            width: 120,
+            width: 100,
             ellipsis: true,
             render: (_: unknown, row: ReportRow) =>
               `${row.first_bbk_name || row.first_bbk_id || "未知分行"}`,
           },
           {
             title: "所属网点",
-            width: 200,
+            width: 140,
             ellipsis: true,
             render: (_: unknown, row: ReportRow) =>
               `${row.org_name || row.org_id || "未知支行"}`,
@@ -334,14 +341,14 @@ function ReportResults({ params }: { params: ReportParams }) {
           {
             title: "SAPID",
             dataIndex: "user_id",
-            width: 100,
+            width: 96,
             ellipsis: true,
             render: (value: string | null) => value || "—",
           },
           {
             title: "SAP岗位",
             dataIndex: "pst_lvl",
-            width: 100,
+            width: 96,
             ellipsis: true,
             render: (value: string | null) => value || "—",
           },
@@ -350,7 +357,7 @@ function ReportResults({ params }: { params: ReportParams }) {
     {
       title: "技能总数",
       dataIndex: "skill_count",
-      width: 100,
+      width: 88,
       align: "right",
       render: (value: number, row) => {
         const unavailable =
@@ -506,12 +513,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
         </div>
         <div className={styles.toolbar}>
           <div className={styles.field}>
-            <label htmlFor="report-date">
-              统计日期{" "}
-              <span>
-                数据 T-1，最多可选 {latestReportDate().format("YYYY-MM-DD")}
-              </span>
-            </label>
+            <label htmlFor="report-date">统计日期</label>
             <DatePicker
               id="report-date"
               aria-label="统计日期"

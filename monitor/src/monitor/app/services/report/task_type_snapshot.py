@@ -303,7 +303,7 @@ def build_filters(
     """按参数拼装过滤条件，全部走参数绑定。"""
     clauses = ["prt_dt = %s", "source_id = %s", "rpt_combo = %s"]
     values: list = [params.end_date.isoformat(), source_id, combo]
-    if params.skill_detail or params.group_by in ("org", "manager"):
+    if params.skill_detail or params.group_by in ("branch", "org", "manager"):
         clauses.append("skill_cnt > 0")
     if params.task_type:
         clauses.append("task_type = %s")

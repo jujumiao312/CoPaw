@@ -884,9 +884,8 @@ async def test_skill_details_exclude_zero_counts_before_paging_and_export(
     assert sheet.max_row == 3
     summary = await request(query={**query, "skill_detail": False})
     assert summary.status_code == 200
-    assert summary.json()["total"] == (1 if group == "branch" else 0)
-    if group == "branch":
-        assert summary.json()["items"][0]["skill_count"] == 0
+    assert summary.json()["total"] == 0
+    assert summary.json()["items"] == []
     env.raw.execute("UPDATE swe_task_type_report_snapshot SET skill_cnt = 0")
     empty = await request(query={**query, **paged})
     assert empty.status_code == 200
@@ -968,7 +967,7 @@ async def test_manager_task_counts_and_export(env, detail, task_type):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("group", ["org", "manager"])
+@pytest.mark.parametrize("group", ["branch", "org", "manager"])
 async def test_summary_zero_skills_filtered_before_total_and_export(
     env, group
 ):
@@ -976,7 +975,7 @@ async def test_summary_zero_skills_filtered_before_total_and_export(
     rows = [
         snapshot_row(
             group,
-            dict(first_bbk_id="001", org_id=f"0{i}", user_id=f"user{i}"),
+            dict(first_bbk_id=f"00{i}", org_id=f"0{i}", user_id=f"user{i}"),
             "push_plan",
             skill_cnt=n,
         )

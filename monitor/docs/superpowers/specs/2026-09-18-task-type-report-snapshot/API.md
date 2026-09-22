@@ -149,7 +149,7 @@
 ### 指标适用范围（2026-09-22）
 
 - 技能明细不读取 `skill_cnt` 指标，`skill_count`、`permission_manager_count` 返回 `null`；仍使用 `skill_cnt > 0` 作为行有效性筛选。
-- 支行和客户经理汇总也在 SQL 层过滤 `skill_cnt > 0`，列表、分页 `total`、全量导出共用条件；总体/分行汇总保持原规则。
+- 分行、支行和客户经理汇总也在 SQL 层过滤 `skill_cnt > 0`，列表、分页 `total`、全量导出共用条件；总体汇总保持原规则。
 - 客户经理汇总及技能明细不查询权限人数，`permission_manager_count`、`active_manager_count` 返回 `null`。
 - 客户经理新增 `active_task_count` ← `active_job_cnt`、`paused_task_count` ← `paused_job_cnt`；保留源表 `NULL`（主动提问无此指标），其他维度返回 `null`。
 - `org_name` 原样使用快照 `org_nm`，不追加分行名称。
