@@ -10,10 +10,10 @@
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 把 `/task-type-report`、`/task-type-report/export` 的全部能力改为读预聚合表，降低 TDSQL 明细扫描压力 |
-| 数据表 | `swe_task_type_report_snapshot`（报表行及日期汇总）；不再依赖 `swe_task_type_report_batch` |
-| 表结构 | `gauss/task_type_report_tdsql.sql`（建表语句 + 写入约定；权威结构是 `src/monitor/app/database/schema.py`） |
-| 数据写入 | 由现场作业自行写入，本仓库不提供装载脚本；写入方须按该文件第 3 节遵守列语义（`'ALL'`、NULL 规则），并保证对外查询时数据完整 |
-| 行覆盖 | 主键 `(prt_dt, source_id, dim_hash)`，同键 upsert 即幂等重写；源侧已消失的维度行若没被清掉会继续出数，属已确认取舍 |
+| 数据表 | `swe_rm_claw_list_ind_stat`（报表行及日期汇总）；不再依赖 `swe_task_type_report_batch` |
+| 表结构 | `src/monitor/app/database/schema.py`（权威 DDL；现场提供表定义，历史 Gauss/Hive 装载文件仅作参考） |
+| 数据写入 | 由现场作业自行写入，本仓库不提供装载脚本；写入方须按 `schema.py` 的 DDL 与本文第 2/3 节遵守列语义（`'ALL'`、NULL 规则），并保证对外查询时数据完整 |
+| 行覆盖 | 主键 `(dw_dat_dt, source_id, dim_hash)`，同键 upsert 即幂等重写；源侧已消失的维度行若没被清掉会继续出数，属已确认取舍 |
 | 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口以当前 source 的 `swe_tenant_init_source` 为左表，LEFT JOIN 跑数日期 `end_date` 的 `jkh_user_inf`，按匹配到的 `user_id` 去重计算；仅总体/分行/支行汇总查询，技能明细及客户经理维度不查询并返回 null；支行按 first_bbk_id + org_id 统计该支行人数，而非整分行；当天名单或来源授权缺失、人数结果不存在或为 NULL 时相应人数为 0 |
 | 在线接口 | `/api/monitor/cron/task-type-report`、`/export`、`/options` 保持不变，仍按明细实时统计 |
 | 代码 | `routers/task_type_snapshot.py`、`services/report/task_type_snapshot.py`、`models/task_type_snapshot.py` |
@@ -44,7 +44,7 @@
 
 - 比例仍为百分点数值，零分母返回 `null`；`read_evidence` 与在线接口一致。
 
-响应兼容保留 `batch`、`status`、`latest_ready_prt_dt`：按快照表的 `prt_dt + source_id` 分组，`row_total` 为实际行数，`sync_date = prt_dt`，`loaded_at = null`。`ready` 仅表示该日期已有数据，不保证装载完成；日期列表不包含无数据日期，起止日取行中的 MIN/MAX。
+响应兼容保留 `batch`、`status`、`latest_ready_prt_dt`：按快照表的 `dw_dat_dt + source_id` 分组并别名返回 `prt_dt`，`row_total` 为实际行数，`sync_date = prt_dt`，`loaded_at = null`。`ready` 仅表示该日期已有数据，不保证装载完成；日期列表不包含无数据日期，起止日取行中的 MIN/MAX。
 
 ## 3. 主查询 GET /task-type
 

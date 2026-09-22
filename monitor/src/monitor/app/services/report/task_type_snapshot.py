@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """金葵花任务类型报表落盘快照查询服务。
 
-报表数据来源：``swe_task_type_report_snapshot``，不依赖批次表，
-由高斯侧 ``gauss/task_type_report_daily.sql`` 预聚合到
-``${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT`` 后装载到 TDSQL
-（装载脚本 ``gauss/task_type_report_tdsql.sql``）。
+报表数据来源：``swe_rm_claw_list_ind_stat``，不依赖批次表；
+数据由现场作业从高斯预聚合结果写入 TDSQL，本仓库不提供该表装载脚本。
 
 与在线服务的分工：
 
@@ -14,9 +12,9 @@
   保持 403 / 422 语义与在线接口一致；
 - 有权限客户经理数不在仓内计算，仍按同一名单快照实时统计。
 
-装载侧没有 DELETE 权限（详见 ``gauss/task_type_report_tdsql.sql``），近 8 天重写走 upsert：
-同键的行原地更新、新键插入，因此上游已消失的维度行（离职客户经理、下线技能）会留在表里
-并带着最后一次装载的数值继续出数——这是业务接受的取舍，本模块不做版本过滤。
+写入方按主键 upsert：同键的行原地更新、新键插入，因此上游已消失的维度行
+（离职客户经理、下线技能）会留在表里并带着最后一次装载的数值继续出数——
+这是业务接受的取舍，本模块不做版本过滤。
 
 区间口径：落盘表是「当月 1 号 ~ 跑数日期」的累计快照，因此只支持该区间；
 其它区间请调用在线接口。
@@ -51,6 +49,30 @@ from ..cron.task_type_report import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 现场表的物理字段名 -> 既有接口/行装配使用的逻辑字段名。
+SNAPSHOT_TABLE = "swe_rm_claw_list_ind_stat"
+COLUMN_MAP = {
+    "prt_dt": "dw_dat_dt",
+    "task_type": "job_type",
+    "first_bbk_id": "frs_bbk_org_id",
+    "first_bbk_nm": "frs_bbk_org_nm",
+    "org_id": "brn_org_id",
+    "org_nm": "brn_org_nm",
+    "user_id": "cm_id",
+    "user_name": "cm_nm",
+    "cn_name": "skill_nm",
+    "task_type_name": "job_type_nm",
+}
+
+
+def _physical_column(column: str) -> str:
+    return COLUMN_MAP.get(column, column)
+
+
+def _select_column(column: str) -> str:
+    physical = _physical_column(column)
+    return column if physical == column else f"{physical} AS {column}"
 
 # 接口组合 -> 落盘表组合标签
 COMBO_MAP = {
@@ -107,23 +129,30 @@ OPTION_COLUMNS = {
     "orgs": ("org_id", "org_nm"),
 }
 TASK_TYPE_ORDER = (
-    "CASE task_type WHEN 'push_plan' THEN 1 "
+    "CASE job_type WHEN 'push_plan' THEN 1 "
     "WHEN 'ask_plan' THEN 2 ELSE 3 END"
 )
-SNAPSHOT_COLUMNS = (
-    "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id, "
-    "user_id, skill_id, first_bbk_nm, org_nm, user_name, pst_lvl, "
-    "cn_name, task_type_name, skill_cnt, active_manager_cnt, "
-    "active_job_cnt, paused_job_cnt, "
-    "suc_execute_job, read_tasks, read_rate, recommended_customers, "
-    "read_customer_cnt, plan_read_rate, insight_customer_cnt, "
-    "click_to_insight_rate, insight_cnt, phone_customer_cnt, "
-    "click_to_phone_rate, phone_cnt, stat_start_dt, stat_end_dt"
+SNAPSHOT_LOGICAL_COLUMNS = (
+    "prt_dt", "source_id", "rpt_combo", "task_type", "first_bbk_id",
+    "org_id", "user_id", "skill_id", "first_bbk_nm", "org_nm",
+    "user_name", "pst_lvl", "cn_name", "task_type_name", "skill_cnt",
+    "active_manager_cnt", "active_job_cnt", "paused_job_cnt",
+    "suc_execute_job", "read_tasks", "read_rate", "recommended_customers",
+    "read_customer_cnt", "plan_read_rate", "insight_customer_cnt",
+    "click_to_insight_rate", "insight_cnt", "phone_customer_cnt",
+    "click_to_phone_rate", "phone_cnt", "stat_start_dt", "stat_end_dt",
+)
+SNAPSHOT_SOURCE_COLUMNS = tuple(
+    _physical_column(column) for column in SNAPSHOT_LOGICAL_COLUMNS
+)
+SNAPSHOT_COLUMNS = ", ".join(
+    _select_column(column) for column in SNAPSHOT_LOGICAL_COLUMNS
 )
 # 兼容响应中的 batch：按快照表日期聚合；ready 只表示已有行，不表示装载完成。
 BATCH_COLUMNS = (
-    "prt_dt, source_id, MIN(stat_start_dt) AS stat_start_dt, "
-    "MAX(stat_end_dt) AS stat_end_dt, prt_dt AS sync_date, "
+    "dw_dat_dt AS prt_dt, source_id, "
+    "MIN(stat_start_dt) AS stat_start_dt, "
+    "MAX(stat_end_dt) AS stat_end_dt, dw_dat_dt AS sync_date, "
     "'ready' AS status, COUNT(*) AS row_total, NULL AS loaded_at"
 )
 # 非分页查询一次最多返回的行数；导出走 MAX_EXPORT_ROWS 上限。
@@ -211,8 +240,9 @@ def _permission_key(record, combo: str) -> tuple:
 
 async def _load_batch(db, prt_dt: date, source_id: str) -> dict | None:
     return await db.fetch_one(
-        f"SELECT {BATCH_COLUMNS} FROM swe_task_type_report_snapshot "
-        "WHERE prt_dt = %s AND source_id = %s GROUP BY prt_dt, source_id",
+        f"SELECT {BATCH_COLUMNS} FROM {SNAPSHOT_TABLE} "
+        f"WHERE {_physical_column('prt_dt')} = %s AND source_id = %s "
+        "GROUP BY dw_dat_dt, source_id",
         (prt_dt.isoformat(), source_id),
     )
 
@@ -301,26 +331,30 @@ def build_filters(
     filters: dict,
 ) -> tuple[str, list]:
     """按参数拼装过滤条件，全部走参数绑定。"""
-    clauses = ["prt_dt = %s", "source_id = %s", "rpt_combo = %s"]
+    clauses = [
+        f"{_physical_column('prt_dt')} = %s",
+        "source_id = %s",
+        "rpt_combo = %s",
+    ]
     values: list = [params.end_date.isoformat(), source_id, combo]
     if params.skill_detail or params.group_by in ("branch", "org", "manager"):
         clauses.append("skill_cnt > 0")
     if params.task_type:
-        clauses.append("task_type = %s")
+        clauses.append(f"{_physical_column('task_type')} = %s")
         values.append(params.task_type)
     if filters.get("first_bbk_id"):
-        clauses.append("first_bbk_id = %s")
+        clauses.append(f"{_physical_column('first_bbk_id')} = %s")
         values.append(filters["first_bbk_id"])
     if filters.get("org_id"):
-        clauses.append("org_id = %s")
+        clauses.append(f"{_physical_column('org_id')} = %s")
         values.append(filters["org_id"])
     if params.user_id:
-        clauses.append("user_id = %s")
+        clauses.append(f"{_physical_column('user_id')} = %s")
         values.append(params.user_id)
     if params.keyword:
         pattern = _keyword_pattern(params.keyword)
         clauses.append(
-            "(user_name LIKE %s ESCAPE '!' OR user_id LIKE %s ESCAPE '!' "
+            "(cm_nm LIKE %s ESCAPE '!' OR cm_id LIKE %s ESCAPE '!' "
             "OR pst_lvl LIKE %s ESCAPE '!')"
         )
         values.extend([pattern, pattern, pattern])
@@ -333,11 +367,12 @@ def order_clause(combo: str) -> str:
     parts: list[str] = []
     for column in ("first_bbk_id", "org_id"):
         if column in dims:
-            parts.append(f"CASE WHEN {column} = '' THEN 1 ELSE 0 END")
-            parts.append(column)
+            physical = _physical_column(column)
+            parts.append(f"CASE WHEN {physical} = '' THEN 1 ELSE 0 END")
+            parts.append(physical)
     for column in ("user_id", "skill_id"):
         if column in dims:
-            parts.append(column)
+            parts.append(_physical_column(column))
     parts.append(TASK_TYPE_ORDER)
     return " ORDER BY " + ", ".join(parts)
 
@@ -351,7 +386,7 @@ async def _fetch_rows(
     if combo in ("manager", "manager_skill"):
         columns = columns.replace("active_manager_cnt, ", "")
     sql = (
-        f"SELECT {columns} FROM swe_task_type_report_snapshot "
+        f"SELECT {columns} FROM {SNAPSHOT_TABLE} "
         f"WHERE {where}{order_clause(combo)}"
     )
     params = list(values)
@@ -363,7 +398,7 @@ async def _fetch_rows(
 
 async def _count_rows(db, where: str, values: list) -> int:
     row = await db.fetch_one(
-        "SELECT COUNT(*) AS total FROM swe_task_type_report_snapshot "
+        f"SELECT COUNT(*) AS total FROM {SNAPSHOT_TABLE} "
         f"WHERE {where}",
         tuple(values),
     )
@@ -634,14 +669,15 @@ class TaskTypeSnapshotService:
         values: list = [source_id]
         if month:
             start, stop = _month_bounds(month)
-            clauses.append("prt_dt >= %s")
+            clauses.append("dw_dat_dt >= %s")
             values.append(start)
-            clauses.append("prt_dt < %s")
+            clauses.append("dw_dat_dt < %s")
             values.append(stop)
         rows = await db.fetch_all(
-            f"SELECT {BATCH_COLUMNS} FROM swe_task_type_report_snapshot "
+            f"SELECT {BATCH_COLUMNS} FROM {SNAPSHOT_TABLE} "
             f"WHERE {' AND '.join(clauses)} "
-            "GROUP BY prt_dt, source_id ORDER BY prt_dt DESC LIMIT %s",
+            "GROUP BY dw_dat_dt, source_id "
+            "ORDER BY dw_dat_dt DESC LIMIT %s",
             tuple(values + [limit]),
         )
         items = [
@@ -676,8 +712,8 @@ class TaskTypeSnapshotService:
         )
         rows = await db.fetch_all(
             "SELECT rpt_combo, COUNT(*) AS row_cnt "
-            "FROM swe_task_type_report_snapshot "
-            "WHERE prt_dt = %s AND source_id = %s GROUP BY rpt_combo",
+            f"FROM {SNAPSHOT_TABLE} "
+            "WHERE dw_dat_dt = %s AND source_id = %s GROUP BY rpt_combo",
             (params.end_date.isoformat(), source_id),
         )
         counts = [

@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import dayjs from "dayjs";
 import { request } from "../../../api/request";
 import ClawSkillDataOverview from "./index";
+import { reportExportFilename } from "./reportExportFilename";
 import { buildTaskReportDemo } from "../../../api/modules/taskTypeReportDemo";
 import type { ReportGroup } from "../../../api/modules/taskTypeReport";
 
@@ -364,5 +365,22 @@ describe("ClawSkillDataOverview report date filter", () => {
     expect(
       screen.queryByText("该统计日期暂无出仓数据"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ClawSkillDataOverview report export filename", () => {
+  it.each([
+    ["branch", "分行"],
+    ["org", "支行"],
+    ["manager", "客户经理"],
+  ] as const)("uses the Chinese name for %s", (group_by, chineseName) => {
+    expect(
+      reportExportFilename({
+        start_date: "2026-09-01",
+        end_date: "2026-09-14",
+        group_by,
+        task_type: "push_plan",
+      }),
+    ).toBe(`Claw-统计报表-${chineseName}-2026-09-01-2026-09-14.xlsx`);
   });
 });

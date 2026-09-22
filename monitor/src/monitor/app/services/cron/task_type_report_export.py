@@ -13,7 +13,11 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font, PatternFill
 
 from .task_type_report import ReportError
-from .task_type_report_rows import NULL_FIELDS, RATIOS
+from .task_type_report_rows import (
+    LABELS as TASK_TYPE_LABELS,
+    NULL_FIELDS,
+    RATIOS,
+)
 
 XLSX_MEDIA_TYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -116,6 +120,13 @@ def _cell(sheet, value, percentage=False):
     return cell
 
 
+def _row_value(row, field):
+    """任务类型名称以码值映射为准，兼容落盘表短名或旧值。"""
+    if field != "task_type_name":
+        return getattr(row, field)
+    return TASK_TYPE_LABELS.get(getattr(row, "task_type"), getattr(row, field))
+
+
 def export_task_type_report(report, task_type: str) -> bytes:
     if len(report.items) > MAX_EXPORT_ROWS:
         raise ReportError(
@@ -142,7 +153,7 @@ def export_task_type_report(report, task_type: str) -> bytes:
     for row in report.items:
         sheet.append(
             [
-                _cell(sheet, getattr(row, field), field.endswith("rate"))
+                _cell(sheet, _row_value(row, field), field.endswith("rate"))
                 for field, _ in columns
             ]
         )

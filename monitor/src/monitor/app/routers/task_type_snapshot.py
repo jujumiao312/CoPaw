@@ -2,7 +2,7 @@
 """金葵花任务类型报表（落盘快照）接口。
 
 数据来自高斯预聚合（AALC_P_RM_CLAW_LIST_USE_IND_STAT）后装载到 TDSQL 的
-swe_task_type_report_snapshot，
+swe_rm_claw_list_ind_stat，
 覆盖在线 /task-type-report 与 /task-type-report/export 的全部查询、导出能力，
 并补充可用跑数日期与批次状态两个运维接口。错误码、请求头与出参结构与在线接口
 保持一致，前端切换时只需要换 URL 与日期参数。

@@ -2,7 +2,7 @@
 """金葵花任务类型报表（落盘快照）请求与响应契约。
 
 数据来源是高斯预聚合（AALC_P_RM_CLAW_LIST_USE_IND_STAT）后装载到 TDSQL 的
-swe_task_type_report_snapshot，
+swe_rm_claw_list_ind_stat，
 口径定义仍在 DESIGN.md / DIMENSIONS.md；行结构复用在线接口的
 ``TaskTypeReportRow``，前端从在线接口切到落盘接口时字段不用改。
 

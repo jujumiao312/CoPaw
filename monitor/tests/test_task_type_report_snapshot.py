@@ -20,7 +20,7 @@ from monitor.app.models.task_type_report import ReportOptionsParams
 from monitor.app.models.task_type_snapshot import SnapshotReportParams
 from monitor.app.services.cron import task_type_report as cron_report
 from monitor.app.services.report.task_type_snapshot import (
-    SNAPSHOT_COLUMNS,
+    SNAPSHOT_SOURCE_COLUMNS,
     TaskTypeSnapshotService,
 )
 
@@ -63,13 +63,14 @@ class SqliteConnection:
 
 
 SCHEMA = """
-CREATE TABLE swe_task_type_report_snapshot(
-    prt_dt TEXT, source_id TEXT,
-    rpt_combo TEXT, task_type TEXT, first_bbk_id TEXT DEFAULT '',
-    org_id TEXT DEFAULT '', user_id TEXT DEFAULT '', skill_id TEXT DEFAULT '',
-    first_bbk_nm TEXT DEFAULT '', org_nm TEXT DEFAULT '',
-    user_name TEXT DEFAULT '', pst_lvl TEXT DEFAULT '', cn_name TEXT DEFAULT '',
-    task_type_name TEXT DEFAULT '', skill_cnt INTEGER DEFAULT 0,
+CREATE TABLE swe_rm_claw_list_ind_stat(
+    dw_dat_dt TEXT, source_id TEXT,
+    rpt_combo TEXT, job_type TEXT, frs_bbk_org_id TEXT DEFAULT '',
+    brn_org_id TEXT DEFAULT '', cm_id TEXT DEFAULT '',
+    skill_id TEXT DEFAULT '', frs_bbk_org_nm TEXT DEFAULT '',
+    brn_org_nm TEXT DEFAULT '', cm_nm TEXT DEFAULT '',
+    pst_lvl TEXT DEFAULT '', skill_nm TEXT DEFAULT '',
+    job_type_nm TEXT DEFAULT '', skill_cnt INTEGER DEFAULT 0,
     active_manager_cnt INTEGER, active_job_cnt INTEGER, paused_job_cnt INTEGER,
     suc_execute_job INTEGER DEFAULT 0,
     read_tasks INTEGER DEFAULT 0, read_rate REAL,
@@ -85,10 +86,10 @@ CREATE TABLE swe_tenant_init_source(tenant_id TEXT, source_id TEXT);
 """
 
 INSERT_SQL = (
-    "INSERT INTO swe_task_type_report_snapshot ("
-    "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id, "
-    "user_id, skill_id, first_bbk_nm, org_nm, user_name, pst_lvl, "
-    "cn_name, task_type_name, skill_cnt, active_manager_cnt, "
+    "INSERT INTO swe_rm_claw_list_ind_stat ("
+    "dw_dat_dt, source_id, rpt_combo, job_type, frs_bbk_org_id, "
+    "brn_org_id, cm_id, skill_id, frs_bbk_org_nm, brn_org_nm, cm_nm, "
+    "pst_lvl, skill_nm, job_type_nm, skill_cnt, active_manager_cnt, "
     "suc_execute_job, read_tasks, read_rate, recommended_customers, "
     "stat_start_dt, stat_end_dt) VALUES ("
     ":prt_dt, :source_id, :rpt_combo, :task_type, :first_bbk_id, "
@@ -191,9 +192,9 @@ def seed(connection: sqlite3.Connection) -> int:
             )
     connection.executemany(INSERT_SQL, rows)
     connection.execute(
-        "INSERT INTO swe_task_type_report_snapshot ("
-        "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id, "
-        "user_id, skill_id, stat_start_dt, stat_end_dt) VALUES "
+        "INSERT INTO swe_rm_claw_list_ind_stat ("
+        "dw_dat_dt, source_id, rpt_combo, job_type, frs_bbk_org_id, "
+        "brn_org_id, cm_id, skill_id, stat_start_dt, stat_end_dt) VALUES "
         "(?, 'OTHER', 'overall', 'push_plan', '', '', '', '', ?, ?)",
         (DATE, "2026-09-01", DATE),
     )
@@ -555,6 +556,36 @@ async def test_http_export_xlsx(env):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["overall", "branch", "org", "manager"])
+async def test_export_task_type_names_are_canonical_for_every_group(
+    env, group
+):
+    env.raw.execute(
+        "UPDATE swe_rm_claw_list_ind_stat SET job_type_nm = job_type"
+    )
+    for task_type in TASK_TYPES:
+        exported = await request(
+            path=f"{BASE_URL}/export",
+            query={
+                "end_date": DATE,
+                "group_by": group,
+                "task_type": task_type,
+            },
+        )
+        assert exported.status_code == 200
+        workbook = load_workbook(BytesIO(exported.content))
+        sheet = workbook.active
+        headers = [cell.value for cell in sheet[1]]
+        column = headers.index("任务类型") + 1
+        values = [
+            sheet.cell(row=row, column=column).value
+            for row in range(2, sheet.max_row + 1)
+        ]
+        assert values and set(values) == {LABELS[task_type]}
+        workbook.close()
+
+
+@pytest.mark.asyncio
 async def test_http_dates_status_and_options(env):
     dates = await request(path=f"{BASE_URL}/dates")
     assert dates.status_code == 200
@@ -590,10 +621,11 @@ async def test_http_dates_status_and_options(env):
 def seed_high_source(connection: sqlite3.Connection) -> None:
     """造一批按高斯落数口径写入的行：不适用维度写 'ALL'。"""
     connection.executemany(
-        "INSERT INTO swe_task_type_report_snapshot ("
-        "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id,"
-        " user_id, skill_id, first_bbk_nm, org_nm, user_name, pst_lvl,"
-        " cn_name, task_type_name, active_manager_cnt, skill_cnt) "
+        "INSERT INTO swe_rm_claw_list_ind_stat ("
+        "dw_dat_dt, source_id, rpt_combo, job_type, frs_bbk_org_id,"
+        " brn_org_id, cm_id, skill_id, frs_bbk_org_nm, brn_org_nm,"
+        " cm_nm, pst_lvl, skill_nm, job_type_nm, active_manager_cnt,"
+        " skill_cnt) "
         "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
         [
             (
@@ -658,7 +690,7 @@ def test_selected_columns_exist_in_table_ddl():
     def declared_columns(ddl: str) -> set[str]:
         return set(
             re.findall(
-                r"^ {4}([a-z_]+)\s+"
+                r"^\s*`?([a-z_]+)`?\s+"
                 r"(?:BIGINT|DATE|DATETIME|VARCHAR|DECIMAL|CHAR)\b",
                 ddl,
                 re.M,
@@ -668,16 +700,15 @@ def test_selected_columns_exist_in_table_ddl():
     snapshot_columns = declared_columns(
         schema.CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE
     )
-    assert {column.strip() for column in SNAPSHOT_COLUMNS.split(",")} <= (
-        snapshot_columns
-    )
+    assert set(SNAPSHOT_SOURCE_COLUMNS) <= snapshot_columns
 
 
 @pytest.mark.asyncio
 async def test_dates_aggregate_rows_and_filter_source_month_limit(env):
     env.raw.executemany(
-        "INSERT INTO swe_task_type_report_snapshot "
-        "(prt_dt, source_id, rpt_combo, task_type) VALUES (?, ?, 'overall', 'push_plan')",
+        "INSERT INTO swe_rm_claw_list_ind_stat "
+        "(dw_dat_dt, source_id, rpt_combo, job_type) "
+        "VALUES (?, ?, 'overall', 'push_plan')",
         [
             ("2026-09-20", "S"),
             ("2026-09-20", "S"),
@@ -724,7 +755,7 @@ async def test_options_prefer_requested_roster_date_without_snapshot(env):
             "L1",
         ),
     )
-    env.raw.execute("DELETE FROM swe_task_type_report_snapshot")
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
     response = await request(
         path=f"{BASE_URL}/options",
         query={"end_date": DATE, "kind": "branches"},
@@ -841,7 +872,7 @@ async def test_permission_left_join_keeps_unmatched_sources_but_counts_only_rost
 async def test_skill_details_exclude_zero_counts_before_paging_and_export(
     env, group
 ):
-    env.raw.execute("DELETE FROM swe_task_type_report_snapshot")
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
     dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
     rows = [
         snapshot_row(
@@ -886,7 +917,7 @@ async def test_skill_details_exclude_zero_counts_before_paging_and_export(
     assert summary.status_code == 200
     assert summary.json()["total"] == 0
     assert summary.json()["items"] == []
-    env.raw.execute("UPDATE swe_task_type_report_snapshot SET skill_cnt = 0")
+    env.raw.execute("UPDATE swe_rm_claw_list_ind_stat SET skill_cnt = 0")
     empty = await request(query={**query, **paged})
     assert empty.status_code == 200
     assert empty.json()["items"] == []
@@ -923,7 +954,7 @@ async def test_unused_metrics_do_not_query(env, monkeypatch, group, detail):
     selects = [
         sql.split(" FROM ")[0]
         for sql in queries
-        if "SELECT prt_dt," in sql and "rpt_combo" in sql
+        if "SELECT dw_dat_dt AS prt_dt," in sql and "rpt_combo" in sql
     ]
     assert selects
     if detail:
@@ -938,8 +969,8 @@ async def test_unused_metrics_do_not_query(env, monkeypatch, group, detail):
 @pytest.mark.parametrize("task_type", TASK_TYPES)
 async def test_manager_task_counts_and_export(env, detail, task_type):
     env.raw.execute(
-        "UPDATE swe_task_type_report_snapshot SET active_job_cnt = 7, "
-        "paused_job_cnt = 2 WHERE task_type <> 'ask_plan'"
+        "UPDATE swe_rm_claw_list_ind_stat SET active_job_cnt = 7, "
+        "paused_job_cnt = 2 WHERE job_type <> 'ask_plan'"
     )
     query = dict(
         end_date=DATE,
@@ -971,7 +1002,7 @@ async def test_manager_task_counts_and_export(env, detail, task_type):
 async def test_summary_zero_skills_filtered_before_total_and_export(
     env, group
 ):
-    env.raw.execute("DELETE FROM swe_task_type_report_snapshot")
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
     rows = [
         snapshot_row(
             group,

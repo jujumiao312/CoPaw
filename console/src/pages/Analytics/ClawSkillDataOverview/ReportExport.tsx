@@ -7,6 +7,7 @@ import {
   type ReportParams,
 } from "../../../api/modules/taskTypeReport";
 import { isTaskReportDemo } from "../../../api/modules/taskTypeReportDemo";
+import { reportExportFilename } from "./reportExportFilename";
 import styles from "./index.module.less";
 
 export function ReportExport({
@@ -35,9 +36,7 @@ export function ReportExport({
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `Claw-${params.skill_detail ? "技能明细" : "统计报表"}-${
-        params.group_by
-      }-${params.start_date}-${params.end_date}.xlsx`;
+      link.download = reportExportFilename(params);
       document.body.appendChild(link);
       link.click();
       link.remove();
