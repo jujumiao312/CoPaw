@@ -1,4 +1,4 @@
-# 任务类型报表落盘接口（/api/monitor/cron/report/task-type*）
+# 任务类型报表落盘接口（/api/monitor/report/task-type*）
 
 更新：2026-09-21。本文是落盘接口的契约真源。指标口径仍以
 [../2026-09-13-jkh-task-report/DESIGN.md](../2026-09-13-jkh-task-report/DESIGN.md) 与
@@ -10,27 +10,24 @@
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 把 `/task-type-report`、`/task-type-report/export` 的全部能力改为读预聚合表，降低 TDSQL 明细扫描压力 |
-| 数据表 | `swe_task_type_report_snapshot`（报表行）、`swe_task_type_report_batch`（批次状态与名单快照日） |
+| 数据表 | `swe_task_type_report_snapshot`（报表行及日期汇总）；不再依赖 `swe_task_type_report_batch` |
 | 表结构 | `gauss/task_type_report_tdsql.sql`（建表语句 + 写入约定；权威结构是 `src/monitor/app/database/schema.py`） |
-| 数据写入 | 由现场作业自行写入，本仓库不提供装载脚本；写入方须按该文件第 3 节遵守列语义（`'ALL'`、NULL 规则）、批次就绪信号与 `sync_date` 约定 |
+| 数据写入 | 由现场作业自行写入，本仓库不提供装载脚本；写入方须按该文件第 3 节遵守列语义（`'ALL'`、NULL 规则），并保证对外查询时数据完整 |
 | 行覆盖 | 主键 `(prt_dt, source_id, dim_hash)`，同键 upsert 即幂等重写；源侧已消失的维度行若没被清掉会继续出数，属已确认取舍 |
-| 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口按批次 `sync_date` 的 `jkh_user_inf` + 当前 source 的 `swe_tenant_init_source` 实时计算；技能明细组合沿用它所在层级的维度统计；批次缺 `sync_date` 返回 409，不会返回全 0 |
+| 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口以当前 source 的 `swe_tenant_init_source` 为左表，LEFT JOIN 跑数日期 `end_date` 的 `jkh_user_inf`，按匹配到的 `user_id` 去重计算；技能明细组合沿用它所在层级的维度统计；当天名单或来源授权缺失、人数结果不存在或为 NULL 时相应人数为 0 |
 | 在线接口 | `/api/monitor/cron/task-type-report`、`/export`、`/options` 保持不变，仍按明细实时统计 |
 | 代码 | `routers/task_type_snapshot.py`、`services/report/task_type_snapshot.py`、`models/task_type_snapshot.py` |
 | 历史链路 | Hive 版（`hive/task_type_report_tdsql.sql`）保留作参考，其建表语句已过时，以 `schema.py` 为准 |
 
-接口前缀 `/api/monitor/cron/report`，五个接口：
-
-> 前缀挂在 `cron` 下不是笔误：网关只把 `/api/monitor/cron/*` 转发给本服务，
-> 独立前缀 `/api/monitor/report` 会落到别的服务返回 404（旧在线接口同样在 cron 前缀下）。
+接口前缀 `/api/monitor/report`，五个接口：
 
 | 接口 | 作用 | 对应在线接口 |
 | --- | --- | --- |
 | `GET /task-type` | 主查询（七种组合、三类任务） | `GET /task-type-report` |
 | `GET /task-type/export` | 全量 XLSX 导出 | `GET /task-type-report/export` |
 | `GET /task-type/options` | 分行/支行下拉选项 | `GET /task-type-report/options` |
-| `GET /task-type/dates` | 可用跑数日期与批次状态 | 新增 |
-| `GET /task-type/status` | 批次就绪与七组合行数核对 | 新增 |
+| `GET /task-type/dates` | 可用跑数日期与行数 | 新增 |
+| `GET /task-type/status` | 快照存在性与七组合行数核对 | 新增 |
 
 ## 2. 通用约定
 
@@ -42,11 +39,12 @@
 
   | 状态 | code | 含义 |
   | --- | --- | --- |
-  | 404 | `report_snapshot_not_found` | 该跑数日期 + 来源没有出仓批次 |
-  | 409 | `report_snapshot_not_ready` | 批次状态不是 `ready`（装载中/失败）或缺少名单快照日 |
+  | 404 | `report_snapshot_not_found` | 该跑数日期 + 来源没有快照行 |
   | 422 | `report_filter_not_supported` | 机构/人员筛选与所选组合维度不匹配 |
 
 - 比例仍为百分点数值，零分母返回 `null`；`read_evidence` 与在线接口一致。
+
+响应兼容保留 `batch`、`status`、`latest_ready_prt_dt`：按快照表的 `prt_dt + source_id` 分组，`row_total` 为实际行数，`sync_date = prt_dt`，`loaded_at = null`。`ready` 仅表示该日期已有数据，不保证装载完成；日期列表不包含无数据日期，起止日取行中的 MIN/MAX。
 
 ## 3. 主查询 GET /task-type
 
@@ -57,7 +55,7 @@
 | `end_date` | 必填，`YYYY-MM-DD`，= 跑数日期（落盘分区），同时是统计截止日 |
 | `start_date` | 可选，只允许等于 `end_date` 当月 1 号；缺省取当月 1 号。其它区间返回 422 |
 | `group_by` | `overall` / `branch` / `org` / `manager`，默认 `overall` |
-| `skill_detail` | 默认 false；true 时 `group_by` 不能是 `overall` |
+| `skill_detail` | 默认 false；true 时 `group_by` 不能是 `overall`，仅返回 `skill_cnt > 0` 的行（分页总数和导出一致） |
 | `task_type` | 可选 `push_plan` / `ask_plan` / `push_other` |
 | `first_bbk_id` / `first_bbk_name` | 分行筛选，需要组合含分行维度（见 3.4） |
 | `org_id` / `org_name` | 网点筛选，需要组合含网点维度 |
@@ -91,7 +89,7 @@
     "prt_dt": "2026-09-17", "source_id": "RMASSIST", "status": "ready",
     "stat_start_dt": "2026-09-01", "stat_end_dt": "2026-09-17",
     "sync_date": "2026-09-17", "row_total": 576123,
-    "loaded_at": "2026-09-18T02:10:33"
+    "loaded_at": null
   },
   "items": [
     {
@@ -157,7 +155,10 @@
 ## 5. 选项 GET /task-type/options
 
 参数 `end_date`、`kind=branches|orgs`、可选 `first_bbk_id`（查支行选项时必须指定分行）。
-名单快照日取该批次记录的 `sync_date`，取值逻辑与在线接口一致；批次缺少 `sync_date` 返回 409。
+优先使用请求 `end_date` 当天的 `jkh_user_inf`；当天完全没有名单时，使用表中最新有效 `sync_date`（不限制早于请求日期）。响应 `sync_date` 返回实际使用的日期。
+选项不检查报表快照是否存在，因此未出仓日期也可以选择机构；仍保留 `X-Bbk-Id` 分行权限限制。
+如果整张名单表没有有效日期，或允许的分行在所选名单中没有机构，返回空 `items`，不伪造选项。
+此回退仅用于 options；主查询的机构校验和权限人数仍使用 `end_date` 当天名单。
 
 ## 6. 日期 GET /task-type/dates
 
@@ -168,12 +169,9 @@
   "source_id": "RMASSIST",
   "latest_ready_prt_dt": "2026-09-17",
   "items": [
-    {"prt_dt": "2026-09-18", "status": "loading", "row_total": 0,
-     "stat_start_dt": "2026-09-01", "stat_end_dt": "2026-09-18",
-     "loaded_at": "2026-09-19T02:10:33"},
     {"prt_dt": "2026-09-17", "status": "ready", "row_total": 576123,
      "stat_start_dt": "2026-09-01", "stat_end_dt": "2026-09-17",
-     "loaded_at": "2026-09-18T02:10:33"}
+     "loaded_at": null}
   ]
 }
 ```
@@ -188,22 +186,24 @@
   "batch": {"prt_dt": "2026-09-17", "source_id": "RMASSIST", "status": "ready",
             "row_total": 576123, "sync_date": "2026-09-17",
             "stat_start_dt": "2026-09-01", "stat_end_dt": "2026-09-17",
-            "loaded_at": "2026-09-18T02:10:33"},
+            "loaded_at": null},
   "combo_counts": [{"rpt_combo": "manager_skill", "row_cnt": 421000}],
   "missing_combos": ["org_skill"]
 }
 ```
 
-批次不存在时返回 404，状态不是 ready 返回 409。
+该日期与来源没有快照行时返回 404；不再返回批次状态相关的 409。
 
 ## 8. 前端切换指引
 
-1. URL：`/api/monitor/cron/task-type-report` → `/api/monitor/cron/report/task-type`，
+1. URL：`/api/monitor/cron/task-type-report` → `/api/monitor/report/task-type`，
    导出与选项同理；请求头不变。
 2. 日期：把 `start_date`/`end_date` 改为只传 `end_date`（跑数日期），
-   日期选择器数据源换成 `/task-type/dates`（默认选 `latest_ready_prt_dt`）。
+   日期选择器数据源换成 `/task-type/dates`（默认选 `latest_ready_prt_dt`，仍以 T-1 为上限）。
+   返回的全部 `items[].prt_dt` 都是有快照的日期，不再按 `status` 过滤；90 个日期窗口之前仍允许查询。
 3. 响应：行字段不变；如需提示“落盘口径”，读 `consistency` / `warnings` / `batch`。
 4. 机构筛选：按 3.4 的矩阵限制可选范围（例如总体汇总不允许选分行）。
+5. 空态：仅 `report_snapshot_not_found` 显示暂无出仓数据；其它错误显示失败信息，不再提示批次装载中。权限人数继续展示。
 
 ## 9. 测试与运行
 
@@ -212,6 +212,6 @@
 ```
 
 测试覆盖组合映射、维度还原、NULL 语义、任务类型过滤与排序、分页与 `has_more`、
-关键字转义、筛选维度限制、跨分行 403、名称歧义 422、批次 404/409、来源隔离、
+关键字转义、筛选维度限制、跨分行 403、名称歧义 422、无快照行 404、来源隔离、
 日期/状态/选项接口、XLSX 导出列与参数校验。SQLite 只验证逻辑与 SQL 形状，
 不代表 TDSQL 方言与性能；上线前需在目标环境核对执行计划与耗时。

@@ -48,7 +48,7 @@ describe("task type report adapter", () => {
     );
     expect(latestReportDate().isBefore(dayjs(), "day")).toBe(true);
   });
-  it("defaults the report date to the earlier of the ready batch and T-1", () => {
+  it("defaults the report date to the earlier of the latest snapshot date and T-1", () => {
     const latest = dayjs().subtract(1, "day").format("YYYY-MM-DD");
     const ready = dayjs().subtract(3, "day").format("YYYY-MM-DD");
     expect(defaultReportDate(null).format("YYYY-MM-DD")).toBe(latest);
@@ -67,7 +67,7 @@ describe("task type report adapter", () => {
       { signal: undefined },
     );
   });
-  it("only allows dates with a ready batch inside the covered window", () => {
+  it("uses returned snapshot dates regardless of compatibility status", () => {
     const at = (offset: number) =>
       dayjs().subtract(offset, "day").format("YYYY-MM-DD");
     const ready = at(3);
@@ -82,24 +82,22 @@ describe("task type report adapter", () => {
       ],
     });
 
-    expect([...window.ready]).toEqual([ready]);
+    expect([...window.ready]).toEqual([loading, ready, failed]);
     expect(window.start).toBe(failed);
     expect(canSelectReportDate(dayjs(ready), window)).toBe(true);
-    expect(canSelectReportDate(dayjs(loading), window)).toBe(false);
-    expect(canSelectReportDate(dayjs(failed), window)).toBe(false);
+    expect(canSelectReportDate(dayjs(loading), window)).toBe(true);
+    expect(canSelectReportDate(dayjs(failed), window)).toBe(true);
     expect(canSelectReportDate(dayjs(at(5)), window)).toBe(true);
     expect(canSelectReportDate(dayjs(), window)).toBe(false);
     expect(canSelectReportDate(dayjs(at(-1)), window)).toBe(false);
     expect(canSelectReportDate(dayjs(at(9)), EMPTY_DATE_WINDOW)).toBe(true);
   });
-  it("maps missing and not-ready batches to an empty state", () => {
+  it("only maps missing snapshots to an empty state", () => {
     const coded = (code: string) => ({ data: { detail: { code } } });
     expect(snapshotUnavailable(coded("report_snapshot_not_found"))).toBe(
       "missing",
     );
-    expect(snapshotUnavailable(coded("report_snapshot_not_ready"))).toBe(
-      "not_ready",
-    );
+    expect(snapshotUnavailable(coded("report_snapshot_not_ready"))).toBeNull();
     expect(snapshotUnavailable(coded("report_scope_forbidden"))).toBeNull();
     expect(snapshotUnavailable(new Error("boom"))).toBeNull();
   });

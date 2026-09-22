@@ -78,23 +78,19 @@ export interface ReportDates {
   latest_ready_prt_dt: string | null;
   items: ReportDateItem[];
 }
-/** 就绪批次覆盖的日期窗口；窗口之外的状态未知，不做限制。 */
+/** 快照数据覆盖的日期窗口；窗口之外是否有数据未知，不做限制。 */
 export interface ReportDateWindow {
   ready: Set<string>;
   start: string | null;
 }
-/** 批次不存在或未就绪；页面按“暂无出仓数据”处理，而不是查询失败。 */
-export type SnapshotUnavailable = "missing" | "not_ready";
+/** 快照不存在时按“暂无出仓数据”处理，其余错误保留错误态。 */
+export type SnapshotUnavailable = "missing";
 export const REPORT_PAGE_SIZE = 20;
-/** 可用跑数日期取最近 90 个批次，覆盖日历上会翻到的范围。 */
+/** 可用跑数日期取最近 90 个快照日期，覆盖日历上会翻到的范围。 */
 const DATE_WINDOW_LIMIT = 90;
 const REPORT_PATH = "/monitor/report/task-type";
 const XLSX_TYPE =
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-const UNAVAILABLE_CODES: Record<string, SnapshotUnavailable> = {
-  report_snapshot_not_found: "missing",
-  report_snapshot_not_ready: "not_ready",
-};
 
 export function getTaskReportBbk() {
   return (
@@ -107,7 +103,7 @@ export function latestReportDate(): Dayjs {
   return dayjs().subtract(1, "day");
 }
 
-/** 默认统计日期：最近就绪批次与 T-1 取较早的一个。 */
+/** 默认统计日期：最近快照日期与 T-1 取较早的一个。 */
 export function defaultReportDate(latestReady?: string | null): Dayjs {
   const latest = latestReportDate();
   if (!latestReady) return latest;
@@ -123,11 +119,7 @@ export const EMPTY_DATE_WINDOW: ReportDateWindow = {
 export function reportDateWindow(dates: ReportDates): ReportDateWindow {
   const items = dates.items ?? [];
   return {
-    ready: new Set(
-      items
-        .filter((item) => item.status?.toLowerCase() === "ready")
-        .map((item) => item.prt_dt),
-    ),
+    ready: new Set(items.map((item) => item.prt_dt)),
     start: items.reduce<string | null>(
       (earliest, item) =>
         !earliest || item.prt_dt < earliest ? item.prt_dt : earliest,
@@ -137,8 +129,8 @@ export function reportDateWindow(dates: ReportDates): ReportDateWindow {
 }
 
 /**
- * 可选统计日期：不超过 T-1；已覆盖的窗口内只放行就绪批次。
- * 窗口之外的日期状态未知，保持可选，避免把窗口外的历史批次一并锁死。
+ * 可选统计日期：不超过 T-1；已覆盖的窗口内只放行有快照数据的日期。
+ * 窗口之外的日期状态未知，保持可选，避免把窗口外的历史快照一并锁死。
  */
 export function canSelectReportDate(
   value: Dayjs,
@@ -155,7 +147,7 @@ export function snapshotUnavailable(
 ): SnapshotUnavailable | null {
   const code = (error as { data?: { detail?: { code?: string } } })?.data
     ?.detail?.code;
-  return code ? UNAVAILABLE_CODES[code] ?? null : null;
+  return code === "report_snapshot_not_found" ? "missing" : null;
 }
 
 function scopedParams<T extends { first_bbk_id?: string }>(params: T): T {

@@ -14,7 +14,7 @@
 | 改接口参数/响应、加错误码 | API.md 第 2~7 节 + 本文第 3、4 节 |
 | 报表数字不对、口径与在线接口不一致 | 本文第 4 节，再比对高斯脚本第 3 段的 `TF_METRIC_FACT` 分支 |
 | 切换前端到底层落盘接口 | API.md 第 8 节 |
-| 装载失败、接口报 404/409/500 | 本文第 5 节 + `gauss/task_type_report_tdsql.sql` |
+| 装载失败、接口报 404/500 | 本文第 5 节 + `gauss/task_type_report_tdsql.sql` |
 | 维护数仓跑数脚本 | [task-type-report-hive.md](task-type-report-hive.md)（Hive 版）与 `gauss/README.md`（高斯版） |
 
 ## 2. 模块分工
@@ -22,10 +22,10 @@
 | 层 | 文件 | 职责 |
 | --- | --- | --- |
 | 高斯跑数 | `gauss/task_type_report_daily.sql` | 每次重跑近 7 天 + 当天共 8 天，按月累计口径预聚合七个组合到 `${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT` |
-| 建表 | `gauss/task_type_report_tdsql.sql` | TDSQL 两张表的建表语句、历史库升级与写入约定；**数据由现场作业写入，本仓库不含装载脚本**；`hive/task_type_report_tdsql.sql` 为历史参考 |
-| 表结构 | `src/monitor/app/database/schema.py` | `CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE` / `_BATCH_TABLE`，服务启动自动建表 |
+| 建表 | `gauss/task_type_report_tdsql.sql` | TDSQL 建表语句（批次表为历史遗留，当前服务不再使用）、历史库升级与写入约定；**数据由现场作业写入，本仓库不含装载脚本**；`hive/task_type_report_tdsql.sql` 为历史参考 |
+| 表结构 | `src/monitor/app/database/schema.py` | `CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE`，服务启动自动建表 |
 | 模型 | `src/monitor/app/models/task_type_snapshot.py` | 参数校验（区间只允许当月）、响应信封；行模型复用 `TaskTypeReportRow` |
-| 服务 | `src/monitor/app/services/report/task_type_snapshot.py` | 批次校验、范围校验、过滤、排序、分页、装配、权限人数 |
+| 服务 | `src/monitor/app/services/report/task_type_snapshot.py` | 快照存在性检查、范围校验、过滤、排序、分页、装配、权限人数 |
 | 路由 | `src/monitor/app/routers/task_type_snapshot.py` | 五个接口与错误码映射；复用在线模块的 `ReportRoute` / `report_errors` |
 | 测试 | `tests/test_task_type_report_snapshot.py` | SQLite 验证 SQL 与装配，ASGI 验证契约与 XLSX |
 
@@ -42,12 +42,12 @@
    保留这层兜底：上游一旦把 `'ALL'` 写进组合维度，前端就会把 `ALL` 当机构号显示。
 3. **筛选必须落在组合维度上**：`FILTER_REQUIRED_GROUPS` 决定分行/网点/经理筛选的可用组合，
    不匹配直接 422 `report_filter_not_supported`，不能用其它组合的数字冒充。
-4. **批次状态是唯一就绪信号**：接口只读 `status='ready'` 的批次（不存在 404、非 ready 409）。
-   写入方要自己保证「先置 loading → 写数据 → 核对行数写进 `row_total` → 置 ready」，
-   半份数据或 0 行时不要置 ready，否则接口会把不完整、或上一版留下的数据当成当天数据返回。
-   批次还必须有 `sync_date`（见第 3 条与第 5 条），否则接口直接 409。
-5. **权限人数不入仓**：`permission_manager_count` 仍按批次 `sync_date` 的名单 +
-   当前 source 的初始化来源实时统计，口径与在线接口一致；不要把该列塞进落盘表。
+4. **不再依赖批次表**：日期和行数按快照表 `prt_dt + source_id` 聚合，无行返回 404。
+   响应兼容保留 `batch`，`status=ready` 仅表示有数据，不代表装载完成；`loaded_at=null`。
+   主查询名单日期 `sync_date` 使用跑数日期 `end_date`，不做日期回退；options 独立读取名单，当天无名单时取最新有效日期，不要求有报表快照。
+   Console 按日期接口返回的所有日期生成可选集合，不再检查 `status`；只有快照不存在的 404 显示空态，其它错误正常展示。
+5. **权限人数不入仓**：`permission_manager_count` 仍按跑数日期 `end_date` 的名单 +
+   当前 source 的初始化来源实时统计：以 `swe_tenant_init_source` 为左表 LEFT JOIN 当天名单，按匹配的 `user_id` 去重；组装时缺失或 NULL 人数置 0。不要把该列塞进落盘表。
 6. **区间只支持当月**：落盘表是月累计快照，`start_date` 只允许等于当月 1 号；
    任意区间继续走在线接口，不要在服务层做“减法”。
 7. **分页与截断**：分页只在 `group_by=manager` 且指定 `task_type` 时可用；
@@ -55,8 +55,7 @@
 8. **表结构跟随高斯源**：列宽对齐高斯源表（`skill_id` 500、分行/经理号 200、名称列
    500/1000），否则装载会截断或报 1406；维度唯一性用 `dim_hash = MD5(组合 + 四个维度列)`，
    因为自然维度列拼出的唯一键超过 InnoDB 3072 字节上限（ERROR 1071）；
-   `stat_start_dt` / `stat_end_dt` 高斯侧不落列，装载时由 `prt_dt` 推导；批次状态与
-   `sync_date` 高斯侧也没有，仍由装载维护（`sync_date` 必须由调度传入）。
+   `stat_start_dt` / `stat_end_dt` 高斯侧不落列，装载时由 `prt_dt` 推导；名单日期由接口直接使用 `prt_dt`，不再维护批次状态。
 9. **列名一致性**：服务查询的列必须都建在表里。历史缺陷：表列是 `insight_customer_cnt`，
    服务曾按 `insight_customer_count` 查询，SQLite 夹具与真实 DDL 不一致所以测试没暴露，
    真实 TDSQL 上所有主查询都会 500（`Unknown column`）。夹具现在按真实列名维护，并由
@@ -66,7 +65,7 @@
     写入方若无法删除旧行（例如账号只有 SELECT/INSERT/UPDATE，`DELETE`、`REPLACE`、`TRUNCATE`
     都不可用），源侧这一版消失的维度行（人员离职、技能下线、名单机构号变化）会留在表里，
     并带着最后一次写入的数值继续出数——业务已确认接受。
-    两点运维提醒：① 0 行时不要置 `ready`；② 残留行可用 `loaded_at` 识别，确需清理由有
+    两点运维提醒：① 保证查询时快照行已完整写入；② 残留行可用 `loaded_at` 识别，确需清理由有
     DELETE/DROP 权限的角色按建表文件第 4 节处理。同一个 `prt_dt + source_id` 建议串行写入。
 
 ## 4. 容易误读的既定口径
@@ -74,29 +73,29 @@
 - `metric_version` 与在线接口不同（`..._snapshot`），`consistency` 为 `snapshot`，
   这不是新口径，而是提示调用方数据来自哪条链路；
 - `warnings` 固定包含 `snapshot_month_to_date`，说明统计区间是“当月 1 号 ~ 跑数日期”；
-- 机构名解析、跨分行 403、名称歧义 422 仍查名单表（批次记录的 `sync_date`），
+- 机构名解析、跨分行 403、名称歧义 422 仍查名单表（跑数日期 `end_date`），
   因此接口对名单有实时依赖，这不是漏改；
 - 技能明细各列仍不可相加，汇总取不带 `_skill` 的组合；
+- `skill_detail=true` 在 SQL 中过滤 `skill_cnt > 0`，零值与 NULL 行不返回，分页计数和导出共用该条件；普通汇总保留技能数为 0 的行。
 - `overall` 组合不支持任何机构筛选（落盘表没有“某分行的总体”这一行）。
 
 ## 5. 排查入口
 
 | 现象 | 先查 |
 | --- | --- |
-| 整段接口 404 `Not Found`（响应体没有 `code`） | 路由没匹配上，不是业务 404：确认请求前缀是 `/api/monitor/cron/report/*`。网关只转发 `/api/monitor/cron/*`，历史上 `/api/monitor/report/*` 这个独立前缀会落到别的服务 |
-| 404 `report_snapshot_not_found` | `swe_task_type_report_batch` 是否有该 `prt_dt + source_id`；写入方是否漏写批次 |
-| 409 `report_snapshot_not_ready` | 批次 `status` 是否 `ready`；`sync_date` 是否为空 |
+| 整段接口 404 `Not Found`（响应体没有 `code`） | 路由没匹配上，不是业务 404：确认当前请求前缀是 `/api/monitor/report/*`，核对服务加载路径、重启情况及网关转发规则 |
+| 404 `report_snapshot_not_found` | `swe_task_type_report_snapshot` 是否有该 `prt_dt + source_id` 的行 |
 | 422 `report_filter_not_supported` | 是否用 overall/branch 组合做了网点或经理筛选（见 API.md 3.4） |
 | 500 `Unknown column 'xxx' in 'field list'` | 服务查询列与表结构不一致：先跑 `test_selected_columns_exist_in_table_ddl` 定位，再对齐 `schema.py` 与 `gauss/task_type_report_tdsql.sql` |
 | 写入报 1062 `Duplicate entry` | 同一 `prt_dt + source_id + 组合 + 维度` 重复写：改用 `INSERT ... ON DUPLICATE KEY UPDATE`（同键原地更新），或先删同分区再写 |
 | 写入报 1142 `command denied` | 用了 `DELETE` / `REPLACE`（内部要求 DELETE 权限）/ `TRUNCATE`（要求 DROP 权限）：账号无这些权限，改用 upsert |
 | 接口多出已经不存在的人员/技能 | 源侧已消失的维度行残留，属本文第 3 节第 10 条的既定取舍；确认要清理时按建表文件第 4 节（用 `loaded_at` 定位未刷新的行） |
-| 有权限客户经理数全是 0 | 先看批次 `sync_date`（为空接口会 409）；再查 `jkh_user_inf` 是否有该快照日的名单、`swe_tenant_init_source` 是否有该 source 对应的 tenant 记录 |
+| 有权限客户经理数全是 0 | 按请求 `end_date` 查 `jkh_user_inf` 是否有该快照日的名单、`swe_tenant_init_source` 是否有该 source 对应的 tenant 记录 |
 | 写入报 1406 或 `Data truncated` | 值超出列宽，按建表文件第 2 节升级表结构（列宽已按源表取宽） |
 | 建表报 1071 `Specified key was too long` | 主键用了自然维度列，改成 `dim_hash`（见建表文件第 1 节） |
 | 前端显示 `ALL` | 落盘表把不适用维度写成了 `ALL` 而出参没还原，检查 `_text` / `_dim` 与 `COMBO_DIM_COLUMNS` |
 | 比例列显示 0 而不是空 | 写入时把 NULL 写成了 0，按建表文件第 3.3 节的 NULL 规则检查（`ask_plan` 的任务状态列、`push_other` 的方案与点击列必须为 NULL） |
-| `/task-type/dates` 只有部分日期 | 写入方漏写了某天的批次行或报表行；接口按批次的 `prt_dt` 列日期，没批次就没有那一天 |
+| `/task-type/dates` 只有部分日期 | 接口仅列快照表中当前来源实际有行的日期；核对来源、月份和 limit |
 | 行数比在线接口少 | 先 `GET /task-type/status` 看 `missing_combos`，再看 Hive 侧第 6 段是否漏写某个组合 |
 | 数字与在线接口不一致 | 比对三处：高斯 `TF_METRIC_FACT` 分支的过滤条件、落盘表 `prt_dt` 是否对应同一跑数日期、在线接口的 `sync_date` 是否同一名单快照日 |
 | 导出 413 | 组合 + 日期粒度太大，缩小筛选或按 `task_type` 分别导出 |
@@ -131,8 +130,7 @@ WHERE prt_dt = '2026-09-17' AND source_id = 'RMASSIST'
 
 ## 7. 验证与限制
 
-- `tests/test_task_type_report_snapshot.py` 19 项通过（含「`'ALL'` 还原」「查询列必须建在
-  表里」「缺 `sync_date` 报 409」）；报表相关回归 203 项通过（按文件逐个运行）。
+- 当前快照测试 29 项通过：不建批次表，覆盖五个接口、日期聚合、月份/来源过滤、options 日期回退、左连接人数统计与空值补 0；在线报表相关回归 153 项通过。
 - `pytest tests/` 整目录运行会被 `tests/test_async_tasks_query_api.py` 注入的 openpyxl 桩
   模块污染，导致后续模块收集失败（既有问题，与本链路无关）；排查时按文件运行，例如
   `venv/Scripts/python.exe -m pytest tests/test_task_type_report_snapshot.py -q`。
@@ -143,7 +141,7 @@ WHERE prt_dt = '2026-09-17' AND source_id = 'RMASSIST'
 - SQLite 只验证 SQL 形状与装配逻辑，不代表 TDSQL 方言、索引命中与真实耗时；
   上线前需在目标 TDSQL 执行 EXPLAIN 并核对接口耗时与导出体积。
 - 数据写入由现场作业负责（本仓库不含装载脚本）：写入方需要按建表文件第 3 节遵守列语义、
-  批次就绪信号与 `sync_date` 约定，否则接口会报 404/409 或给出错误数字。
+  NULL/维度列约定；装载完整性由写入方负责，接口不再检查批次状态。
 
 ## 8. Gauss V2 no_lower 专用口径
 

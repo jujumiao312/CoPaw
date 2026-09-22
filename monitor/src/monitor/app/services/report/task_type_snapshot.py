@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """金葵花任务类型报表落盘快照查询服务。
 
-数据来源：``swe_task_type_report_snapshot`` / ``swe_task_type_report_batch``，
+报表数据来源：``swe_task_type_report_snapshot``，不依赖批次表，
 由高斯侧 ``gauss/task_type_report_daily.sql`` 预聚合到
 ``${AALC_DATA}.AALC_P_RM_CLAW_LIST_USE_IND_STAT`` 后装载到 TDSQL
 （装载脚本 ``gauss/task_type_report_tdsql.sql``）。
@@ -10,7 +10,7 @@
 
 - 指标口径、去重范围、NULL 规则由出仓脚本保证，本模块只做筛选、排序、分页、装配；
 - 机构范围校验与机构名称解析复用在线服务的 ``validate_roster_scope`` /
-  ``resolve_organization_filters``，校验对象是批次记录的名单快照日（sync_date），
+  ``resolve_organization_filters``，校验对象是跑数日期（prt_dt / end_date）对应的名单快照，
   保持 403 / 422 语义与在线接口一致；
 - 有权限客户经理数不在仓内计算，仍按同一名单快照实时统计。
 
@@ -119,9 +119,11 @@ SNAPSHOT_COLUMNS = (
     "click_to_insight_rate, insight_cnt, phone_customer_cnt, "
     "click_to_phone_rate, phone_cnt, stat_start_dt, stat_end_dt"
 )
+# 兼容响应中的 batch：按快照表日期聚合；ready 只表示已有行，不表示装载完成。
 BATCH_COLUMNS = (
-    "prt_dt, source_id, stat_start_dt, stat_end_dt, sync_date, "
-    "status, row_total, loaded_at"
+    "prt_dt, source_id, MIN(stat_start_dt) AS stat_start_dt, "
+    "MAX(stat_end_dt) AS stat_end_dt, prt_dt AS sync_date, "
+    "'ready' AS status, COUNT(*) AS row_total, NULL AS loaded_at"
 )
 # 非分页查询一次最多返回的行数；导出走 MAX_EXPORT_ROWS 上限。
 MAX_REPORT_ROWS = 200000
@@ -135,7 +137,6 @@ NO_MATCHING_ORGANIZATION = "no_matching_organization"
 NO_MATCHING_SKILLS = "no_matching_skills"
 ROWS_TRUNCATED = "report_rows_truncated"
 SNAPSHOT_NOT_FOUND_CODE = "report_snapshot_not_found"
-SNAPSHOT_NOT_READY_CODE = "report_snapshot_not_ready"
 FILTER_NOT_SUPPORTED_CODE = "report_filter_not_supported"
 
 
@@ -209,27 +210,19 @@ def _permission_key(record, combo: str) -> tuple:
 
 async def _load_batch(db, prt_dt: date, source_id: str) -> dict | None:
     return await db.fetch_one(
-        f"SELECT {BATCH_COLUMNS} FROM swe_task_type_report_batch "
-        "WHERE prt_dt = %s AND source_id = %s",
+        f"SELECT {BATCH_COLUMNS} FROM swe_task_type_report_snapshot "
+        "WHERE prt_dt = %s AND source_id = %s GROUP BY prt_dt, source_id",
         (prt_dt.isoformat(), source_id),
     )
 
 
 def _require_ready(batch, prt_dt: date, source_id: str) -> dict:
-    """批次不存在报 404，状态不是 ready 报 409，避免把未就绪当成没有数据。"""
+    """该日期与来源没有快照行时返回 404；不再读取装载状态。"""
     if not batch:
         raise ReportError(
             404,
             SNAPSHOT_NOT_FOUND_CODE,
             f"{prt_dt.isoformat()} 没有来源 {source_id} 的报表批次。",
-        )
-    status = str(batch.get("status") or "").lower()
-    if status != "ready":
-        raise ReportError(
-            409,
-            SNAPSHOT_NOT_READY_CODE,
-            f"{prt_dt.isoformat()} 来源 {source_id} 的报表批次状态为 "
-            f"{status or 'unknown'}，请等待出仓完成或重跑。",
         )
     return batch
 
@@ -268,19 +261,8 @@ def _legacy_params(
 async def _resolve_scope(
     db, batch: dict, params: SnapshotReportParams
 ) -> tuple[bool, dict]:
-    """机构范围校验 + 名称解析；缺名单快照日按未就绪处理。
-
-    名单快照日是有权限客户经理数、机构范围校验（403）与机构名称解析的共同依据。
-    缺了它，``permission_manager_count`` 只能给出全 0，而且会静默跳过机构范围校验，
-    所以宁可报 409 也不要返回看起来正常、实际是错的数字。
-    """
-    sync_date = str(batch.get("sync_date") or "").strip()
-    if not sync_date:
-        raise ReportError(
-            409,
-            SNAPSHOT_NOT_READY_CODE,
-            "批次缺少名单快照日，统计不出有权限客户经理数，请重新装载。",
-        )
+    """按跑数当天的名单做机构范围校验与名称解析。"""
+    sync_date = str(batch["sync_date"])
     legacy = _legacy_params(params, sync_date)
     await validate_roster_scope(db, sync_date, legacy)
     return await resolve_organization_filters(db, sync_date, legacy)
@@ -319,6 +301,8 @@ def build_filters(
     """按参数拼装过滤条件，全部走参数绑定。"""
     clauses = ["prt_dt = %s", "source_id = %s", "rpt_combo = %s"]
     values: list = [params.end_date.isoformat(), source_id, combo]
+    if params.skill_detail:
+        clauses.append("skill_cnt > 0")
     if params.task_type:
         clauses.append("task_type = %s")
         values.append(params.task_type)
@@ -409,14 +393,14 @@ async def _fetch_permission_counts(
     combo: str,
     filters: dict,
 ) -> dict[tuple, int]:
-    """有权限客户经理数：同一名单快照 + 当前 source 的初始化来源记录。"""
+    """以当前 source 的初始化来源为左表，统计当天名单中匹配的客户经理。"""
     sync_date = str(batch.get("sync_date") or "").strip()
     if not sync_date:
         return {}
     columns = _permission_dim_columns(combo)
     select_dims = ", ".join(f"r.{column}" for column in columns)
-    clauses = ["r.sync_date = %s", "r.user_id IS NOT NULL", "r.user_id <> ''"]
-    values: list = [source_id, sync_date]
+    clauses = ["i.source_id = %s"]
+    values: list = [sync_date, source_id]
     if filters.get("first_bbk_id"):
         clauses.append("r.first_bbk_id = %s")
         values.append(filters["first_bbk_id"])
@@ -430,10 +414,11 @@ async def _fetch_permission_counts(
     dims_select = select_dims or "'' AS dummy"
     sql = (
         f"SELECT {dims_select}, "
-        "COUNT(DISTINCT i.tenant_id) AS permission_manager_count "
-        "FROM jkh_user_inf r "
-        "LEFT JOIN swe_tenant_init_source i "
-        "ON i.tenant_id = r.user_id AND i.source_id = %s "
+        "COUNT(DISTINCT r.user_id) AS permission_manager_count "
+        "FROM swe_tenant_init_source i "
+        "LEFT JOIN jkh_user_inf r "
+        "ON i.tenant_id = r.user_id AND r.sync_date = %s "
+        "AND r.user_id <> '' "
         f"WHERE {' AND '.join(clauses)}{group_by}"
     )
     rows = await db.fetch_all(sql, tuple(values))
@@ -469,8 +454,8 @@ def _to_row(
         task_type_name=_text(record.get("task_type_name"))
         or TASK_TYPE_LABELS.get(task_type, task_type),
         skill_count=_int(record.get("skill_cnt")),
-        permission_manager_count=permission_counts.get(
-            _permission_key(record, combo), 0
+        permission_manager_count=_int(
+            permission_counts.get(_permission_key(record, combo))
         ),
         active_manager_count=_optional_int(record.get("active_manager_cnt")),
         suc_execute_job=_int(record.get("suc_execute_job")),
@@ -624,9 +609,9 @@ class TaskTypeSnapshotService:
             clauses.append("prt_dt < %s")
             values.append(stop)
         rows = await db.fetch_all(
-            f"SELECT {BATCH_COLUMNS} FROM swe_task_type_report_batch "
+            f"SELECT {BATCH_COLUMNS} FROM swe_task_type_report_snapshot "
             f"WHERE {' AND '.join(clauses)} "
-            "ORDER BY prt_dt DESC LIMIT %s",
+            "GROUP BY prt_dt, source_id ORDER BY prt_dt DESC LIMIT %s",
             tuple(values + [limit]),
         )
         items = [
@@ -687,25 +672,23 @@ class TaskTypeSnapshotService:
         source_id: str,
         bbk_id: str,
     ) -> ReportOptionsResponse:
-        """分行/支行下拉选项，名单快照日取该批次出仓时使用的日期。"""
+        """分行/支行选项独立于报表快照；优先当天名单，缺失则取最新日期。"""
         params = enforce_branch(params, bbk_id)
         if params.kind == "orgs" and params.first_bbk_id is None:
             raise ReportError(
                 422, "report_branch_required", "查询支行选项必须指定分行。"
             )
         db = report_db()
-        batch = _require_ready(
-            await _load_batch(db, params.end_date, source_id),
-            params.end_date,
-            source_id,
+        roster = await db.fetch_one(
+            "SELECT COALESCE(MAX(CASE WHEN sync_date = %s "
+            "THEN sync_date END), MAX(sync_date)) AS sync_date "
+            "FROM jkh_user_inf WHERE sync_date IS NOT NULL "
+            "AND TRIM(sync_date) <> ''",
+            (params.end_date.isoformat(),),
         )
-        sync_date = str(batch.get("sync_date") or "").strip()
-        if not sync_date:
-            raise ReportError(
-                409,
-                SNAPSHOT_NOT_READY_CODE,
-                "批次缺少名单快照日，无法提供机构选项。",
-            )
+        sync_date = _text(roster.get("sync_date")) if roster else None
+        if sync_date is None:
+            return ReportOptionsResponse(sync_date=None, items=[])
         id_column, name_column = OPTION_COLUMNS[params.kind]
         clauses = ["sync_date = %s"]
         values: list = [sync_date]

@@ -16,7 +16,7 @@ interface ReportState {
   unavailable?: SnapshotUnavailable;
 }
 
-/** 批次不存在/未就绪按空数据渲染，其余错误照旧走错误态。 */
+/** 快照不存在按空数据渲染，其余错误照旧走错误态。 */
 function failure(error: unknown): ReportState {
   const unavailable = snapshotUnavailable(error);
   return {

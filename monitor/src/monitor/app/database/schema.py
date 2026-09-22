@@ -866,25 +866,6 @@ CREATE TABLE IF NOT EXISTS swe_task_type_report_snapshot (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='金葵花任务类型报表落盘快照(数据源:高斯)';
 """
 
-# 批次表：记录每个 数据日期 + 来源 的就绪状态与名单快照日，由写入方维护；
-# 接口只读 status='ready' 的批次，且必须有 sync_date（算有权限客户经理数）。
-CREATE_TASK_TYPE_REPORT_BATCH_TABLE = """
-CREATE TABLE IF NOT EXISTS swe_task_type_report_batch (
-    prt_dt            DATE NOT NULL COMMENT '数据日期(高斯 DW_DAT_DT)',
-    source_id         VARCHAR(100) NOT NULL COMMENT '来源标识(高斯 SOURCE_ID)',
-    stat_start_dt     DATE DEFAULT NULL COMMENT '统计区间起始日（当月1号）',
-    stat_end_dt       DATE DEFAULT NULL COMMENT '统计区间截止日（= prt_dt）',
-    sync_date         VARCHAR(32) DEFAULT '' COMMENT '名单快照日，用于机构/权限校验',
-    status            VARCHAR(16) NOT NULL DEFAULT 'loading' COMMENT '批次状态: loading/ready/failed',
-    row_total         BIGINT NOT NULL DEFAULT 0 COMMENT '本批次写入行数',
-    message           VARCHAR(512) DEFAULT '' COMMENT '失败原因或备注',
-    loaded_at         DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '写入时间',
-    updated_at        DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
-
-    PRIMARY KEY (prt_dt, source_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='金葵花任务类型报表装载批次';
-"""
-
 
 # pylint: disable=too-many-statements
 async def init_database_tables() -> None:
@@ -940,11 +921,6 @@ async def init_database_tables() -> None:
         await db.execute(CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE)
         logger.info(
             "Created task_type_report_snapshot table (or already exists)",
-        )
-
-        await db.execute(CREATE_TASK_TYPE_REPORT_BATCH_TABLE)
-        logger.info(
-            "Created task_type_report_batch table (or already exists)",
         )
 
         await db.execute(CREATE_CRON_RESULT_INDEX_TABLE)

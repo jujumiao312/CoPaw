@@ -192,7 +192,7 @@ async def task_type_snapshot_options(
         TaskTypeSnapshotService, Depends(get_task_type_snapshot_service)
     ],
 ) -> ReportOptionsResponse:
-    """分行/支行下拉选项，名单快照日跟随该批次。"""
+    """分行/支行下拉选项；当天无名单时使用最新一天名单。"""
     async with report_errors():
         return await asyncio.wait_for(
             service.get_options(params, source_id, bbk_id),

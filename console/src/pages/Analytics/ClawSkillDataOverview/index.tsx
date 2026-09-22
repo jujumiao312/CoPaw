@@ -29,7 +29,6 @@ import {
   type ReportRow,
   type ReportParams,
   type ReportDateWindow,
-  type SnapshotUnavailable,
   type TaskType,
 } from "../../../api/modules/taskTypeReport";
 import { useIframeStore } from "../../../stores/iframeStore";
@@ -108,11 +107,6 @@ function entityName(row: ReportRow, group: ReportGroup) {
     }`;
   return row.first_bbk_name || row.first_bbk_id || "未知分行";
 }
-function unavailableNotice(reason: SnapshotUnavailable, date: string) {
-  return reason === "not_ready"
-    ? `${date} 的数据仍在装载中，请稍后重试或更换统计日期。`
-    : `${date} 没有出仓数据，请更换统计日期。`;
-}
 function ReportTable({
   params,
   columns,
@@ -168,7 +162,7 @@ function ReportTable({
           className={styles.notice}
           type="info"
           showIcon
-          message={unavailableNotice(report.unavailable, params.end_date)}
+          message={`${params.end_date} 没有出仓数据，请更换统计日期。`}
           action={
             onReload ? <Button onClick={onReload}>重试</Button> : undefined
           }
@@ -439,7 +433,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
   const [keyword, setKeyword] = useState("");
   useEffect(() => {
     const abort = new AbortController();
-    // 默认落在最近就绪批次；取不到时保留 T-1，由报表请求给出空态。
+    // 默认落在最近有快照数据的日期；取不到时保留 T-1，由报表请求给出空态。
     getTaskReportDates(abort.signal).then(
       (dates) => {
         if (abort.signal.aborted) return;

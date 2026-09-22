@@ -159,7 +159,7 @@ describe("ClawSkillDataOverview report date filter", () => {
     ).toBeInTheDocument();
   });
 
-  it("defaults to the latest ready batch when it is older than T-1", async () => {
+  it("defaults to the latest snapshot date when it is older than T-1", async () => {
     const ready = dayjs().subtract(2, "day");
     mockRequests({ latest_ready_prt_dt: ready.format("YYYY-MM-DD") });
 
@@ -178,7 +178,7 @@ describe("ClawSkillDataOverview report date filter", () => {
     );
   });
 
-  it("keeps T-1 as the ceiling when the ready batch is newer", async () => {
+  it("keeps T-1 as the ceiling when the snapshot date is newer", async () => {
     mockRequests({ latest_ready_prt_dt: dayjs().format("YYYY-MM-DD") });
 
     await renderPage();
@@ -199,15 +199,14 @@ describe("ClawSkillDataOverview report date filter", () => {
     ).toBe(true);
   });
 
-  it("greys out dates in the covered window without a ready batch", async () => {
+  it("greys out dates in the covered window without snapshot rows", async () => {
     const at = (offset: number) =>
       dayjs().subtract(offset, "day").format("YYYY-MM-DD");
     mockRequests({
       latest_ready_prt_dt: at(3),
       items: [
         { prt_dt: at(3), status: "ready" },
-        { prt_dt: at(2), status: "loading" },
-        { prt_dt: at(4), status: "failed" },
+        { prt_dt: at(4), status: "ready" },
       ],
     });
 
@@ -221,25 +220,35 @@ describe("ClawSkillDataOverview report date filter", () => {
 
     expect(disabled(at(3))).toBe(false);
     expect(disabled(at(2))).toBe(true);
-    expect(disabled(at(4))).toBe(true);
+    expect(disabled(at(4))).toBe(false);
     expect(disabled(at(5))).toBe(false);
   });
 
-  it.each([
-    ["report_snapshot_not_found", "没有出仓数据，请更换统计日期。"],
-    [
-      "report_snapshot_not_ready",
-      "的数据仍在装载中，请稍后重试或更换统计日期。",
-    ],
-  ])("renders %s as an empty state", async (code, notice) => {
-    mockMissingBatch(code);
-    const date = dayjs().subtract(1, "day").format("YYYY-MM-DD");
+  it.each([["report_snapshot_not_found", "没有出仓数据，请更换统计日期。"]])(
+    "renders %s as an empty state",
+    async (code, notice) => {
+      mockMissingBatch(code);
+      const date = dayjs().subtract(1, "day").format("YYYY-MM-DD");
 
+      await renderPage();
+
+      expect(await screen.findByText(`${date} ${notice}`)).toBeInTheDocument();
+      expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
+      expect(screen.getByText("该统计日期暂无出仓数据")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /导出统计报表/ }),
+      ).toBeDisabled();
+    },
+  );
+  it("shows unexpected backend errors instead of an obsolete loading-batch state", async () => {
+    mockMissingBatch("report_snapshot_not_ready");
     await renderPage();
-
-    expect(await screen.findByText(`${date} ${notice}`)).toBeInTheDocument();
-    expect(screen.queryByText(/加载失败/)).not.toBeInTheDocument();
-    expect(screen.getByText("该统计日期暂无出仓数据")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /导出统计报表/ })).toBeDisabled();
+    expect(
+      (await screen.findAllByText(/backend message/)).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/仍在装载中/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("该统计日期暂无出仓数据"),
+    ).not.toBeInTheDocument();
   });
 });

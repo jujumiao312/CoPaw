@@ -82,7 +82,7 @@ def month_first_day(value: date) -> date:
 
 
 class SnapshotBatchInfo(BaseModel):
-    """装载批次信息；status 不是 ready 时接口按未就绪处理。"""
+    """快照日期汇总；ready 表示已有数据，loaded_at 未提供时为 null。"""
 
     prt_dt: date
     source_id: str

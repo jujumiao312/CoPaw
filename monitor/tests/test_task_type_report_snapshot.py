@@ -20,12 +20,11 @@ from monitor.app.models.task_type_report import ReportOptionsParams
 from monitor.app.models.task_type_snapshot import SnapshotReportParams
 from monitor.app.services.cron import task_type_report as cron_report
 from monitor.app.services.report.task_type_snapshot import (
-    BATCH_COLUMNS,
     SNAPSHOT_COLUMNS,
     TaskTypeSnapshotService,
 )
 
-BASE_URL = "/api/monitor/cron/report/task-type"
+BASE_URL = "/api/monitor/report/task-type"
 HEADERS = {"X-Source-Id": "S", "X-Bbk-Id": "100"}
 DATE = "2026-09-17"
 DATE_VALUE = date(2026, 9, 17)
@@ -78,9 +77,6 @@ CREATE TABLE swe_task_type_report_snapshot(
     click_to_insight_rate REAL, insight_cnt INTEGER,
     phone_customer_cnt INTEGER, click_to_phone_rate REAL,
     phone_cnt INTEGER, stat_start_dt TEXT, stat_end_dt TEXT);
-CREATE TABLE swe_task_type_report_batch(
-    prt_dt TEXT, source_id TEXT, stat_start_dt TEXT, stat_end_dt TEXT,
-    sync_date TEXT, status TEXT, row_total INTEGER, loaded_at TEXT);
 CREATE TABLE jkh_user_inf(user_id TEXT, sync_date TEXT, first_bbk_id TEXT,
     org_id TEXT, first_bbk_nm TEXT, org_nm TEXT, user_name TEXT,
     pst_lvl TEXT);
@@ -136,43 +132,8 @@ def snapshot_row(combo, dims, task_type, **metrics):
 
 
 def seed(connection: sqlite3.Connection) -> int:
-    """准备批次、名单、权限来源与七个组合中的六个组合数据。"""
+    """只建快照、名单、权限来源三张表，准备六个组合数据。"""
     connection.executescript(SCHEMA)
-    connection.executemany(
-        "INSERT INTO swe_task_type_report_batch VALUES(?,?,?,?,?,?,?,?)",
-        [
-            (
-                DATE,
-                "S",
-                "2026-09-01",
-                DATE,
-                DATE,
-                "ready",
-                0,
-                "2026-09-18 02:00:00",
-            ),
-            (
-                "2026-09-18",
-                "S",
-                "2026-09-01",
-                "2026-09-18",
-                "2026-09-18",
-                "loading",
-                0,
-                "2026-09-19 02:00:00",
-            ),
-            (
-                DATE,
-                "OTHER",
-                "2026-09-01",
-                DATE,
-                DATE,
-                "ready",
-                1,
-                "2026-09-18 02:00:00",
-            ),
-        ],
-    )
     connection.executemany(
         "INSERT INTO jkh_user_inf VALUES(?,?,?,?,?,?,?,?)",
         [
@@ -234,11 +195,6 @@ def seed(connection: sqlite3.Connection) -> int:
         "user_id, skill_id, stat_start_dt, stat_end_dt) VALUES "
         "(?, 'OTHER', 'overall', 'push_plan', '', '', '', '', ?, ?)",
         (DATE, "2026-09-01", DATE),
-    )
-    connection.execute(
-        "UPDATE swe_task_type_report_batch SET row_total = ? "
-        "WHERE prt_dt = ? AND source_id = 'S'",
-        (len(rows), DATE),
     )
     connection.commit()
     return len(rows)
@@ -442,8 +398,8 @@ async def test_missing_and_loading_batch(env):
     assert excinfo.value.code == "report_snapshot_not_found"
     with pytest.raises(cron_report.ReportError) as excinfo:
         await service().get_report(params(end_date="2026-09-18"), "S", "100")
-    assert excinfo.value.status_code == 409
-    assert excinfo.value.code == "report_snapshot_not_ready"
+    assert excinfo.value.status_code == 404
+    assert excinfo.value.code == "report_snapshot_not_found"
 
 
 @pytest.mark.asyncio
@@ -454,35 +410,38 @@ async def test_source_isolation(env):
 
 
 @pytest.mark.asyncio
-async def test_missing_sync_date_is_not_ready(env):
-    """有权限客户经理数靠名单快照日实时算：缺了它必须 409，不能静默返回全 0。"""
-    env.raw.execute(
-        "UPDATE swe_task_type_report_batch SET sync_date = '' "
-        "WHERE prt_dt = ? AND source_id = 'S'",
-        (DATE,),
-    )
-    env.raw.commit()
-    with pytest.raises(cron_report.ReportError) as excinfo:
-        await service().get_report(params(group_by="manager"), "S", "100")
-    assert excinfo.value.status_code == 409
-    assert excinfo.value.code == "report_snapshot_not_ready"
+async def test_report_without_batch_table_keeps_permission_counts(env):
+    tables = {
+        row[0]
+        for row in env.raw.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    assert "swe_task_type_report_batch" not in tables
     response = await request(
-        query={"end_date": DATE, "group_by": "manager", "task_type": "push_plan"}
+        query={
+            "end_date": DATE,
+            "group_by": "manager",
+            "task_type": "push_plan",
+        }
     )
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "report_snapshot_not_ready"
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sync_date"] == DATE
+    assert body["batch"]["sync_date"] == DATE
+    assert body["batch"]["loaded_at"] is None
+    assert [row["permission_manager_count"] for row in body["items"]] == [1, 1]
 
 
 @pytest.mark.asyncio
 async def test_dates_and_status(env):
     dates = await service().get_dates("S")
     assert [item.prt_dt.isoformat() for item in dates.items] == [
-        "2026-09-18",
         DATE,
     ]
     assert dates.latest_ready_prt_dt.isoformat() == DATE
     scoped = await service().get_dates("S", "2026-09")
-    assert len(scoped.items) == 2
+    assert len(scoped.items) == 1
     status = await service().get_status(params(), "S", "100")
     assert status.batch.status == "ready"
     counts = {item.rpt_combo: item.row_cnt for item in status.combo_counts}
@@ -528,8 +487,8 @@ async def test_http_contract_and_validation(env):
     not_found = await request(query={"end_date": "2026-09-30"})
     assert not_found.status_code == 404
     not_ready = await request(query={"end_date": "2026-09-18"})
-    assert not_ready.status_code == 409
-    assert not_ready.json()["detail"]["code"] == "report_snapshot_not_ready"
+    assert not_ready.status_code == 404
+    assert not_ready.json()["detail"]["code"] == "report_snapshot_not_found"
     filter_scope = await request(
         query={"end_date": DATE, "first_bbk_id": "001"}
     )
@@ -628,10 +587,6 @@ async def test_http_dates_status_and_options(env):
 
 def seed_high_source(connection: sqlite3.Connection) -> None:
     """造一批按高斯落数口径写入的行：不适用维度写 'ALL'。"""
-    connection.execute(
-        "INSERT INTO swe_task_type_report_batch VALUES(?,?,?,?,?,?,?,?)",
-        (DATE, "G", "2026-09-01", DATE, DATE, "ready", 4, "2026-09-18 02:00:00"),
-    )
     connection.executemany(
         "INSERT INTO swe_task_type_report_snapshot ("
         "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id,"
@@ -711,10 +666,228 @@ def test_selected_columns_exist_in_table_ddl():
     snapshot_columns = declared_columns(
         schema.CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE
     )
-    batch_columns = declared_columns(schema.CREATE_TASK_TYPE_REPORT_BATCH_TABLE)
     assert {column.strip() for column in SNAPSHOT_COLUMNS.split(",")} <= (
         snapshot_columns
     )
-    assert {column.strip() for column in BATCH_COLUMNS.split(",")} <= (
-        batch_columns
+
+
+@pytest.mark.asyncio
+async def test_dates_aggregate_rows_and_filter_source_month_limit(env):
+    env.raw.executemany(
+        "INSERT INTO swe_task_type_report_snapshot "
+        "(prt_dt, source_id, rpt_combo, task_type) VALUES (?, ?, 'overall', 'push_plan')",
+        [
+            ("2026-09-20", "S"),
+            ("2026-09-20", "S"),
+            ("2026-10-01", "S"),
+            ("2026-09-21", "OTHER"),
+        ],
     )
+    dates = await service().get_dates("S", "2026-09", limit=1)
+    assert dates.latest_ready_prt_dt.isoformat() == "2026-09-20"
+    assert len(dates.items) == 1
+    assert dates.items[0].row_total == 2
+    assert dates.items[0].status == "ready"
+    assert dates.items[0].loaded_at is None
+    empty = await service().get_dates("ABSENT")
+    assert empty.items == [] and empty.latest_ready_prt_dt is None
+
+
+@pytest.mark.asyncio
+async def test_permission_counts_use_run_date_and_source(env):
+    env.raw.execute(
+        "UPDATE jkh_user_inf SET sync_date = '2026-09-16' WHERE user_id = 'alice'"
+    )
+    env.raw.execute(
+        "INSERT INTO swe_tenant_init_source VALUES ('carol', 'OTHER')"
+    )
+    report = await service().get_report(params(), "S", "100")
+    assert all(row.permission_manager_count == 1 for row in report.items)
+    other = await service().get_report(params(), "OTHER", "100")
+    assert other.items[0].permission_manager_count == 2
+
+
+@pytest.mark.asyncio
+async def test_options_prefer_requested_roster_date_without_snapshot(env):
+    env.raw.execute(
+        "INSERT INTO jkh_user_inf VALUES(?,?,?,?,?,?,?,?)",
+        (
+            "later",
+            "2026-09-20",
+            "004",
+            "04",
+            "新分行",
+            "新支行",
+            "later",
+            "L1",
+        ),
+    )
+    env.raw.execute("DELETE FROM swe_task_type_report_snapshot")
+    response = await request(
+        path=f"{BASE_URL}/options",
+        query={"end_date": DATE, "kind": "branches"},
+    )
+    assert response.status_code == 200
+    assert response.json()["sync_date"] == DATE
+    assert [item["value"] for item in response.json()["items"]] == [
+        "001",
+        "002",
+        "003",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_options_fallback_to_latest_roster_date_and_keep_branch_scope(
+    env,
+):
+    env.raw.execute(
+        "INSERT INTO jkh_user_inf VALUES(?,?,?,?,?,?,?,?)",
+        (
+            "later",
+            "2026-09-20",
+            "004",
+            "04",
+            "新分行",
+            "新支行",
+            "later",
+            "L1",
+        ),
+    )
+    for requested in ("2026-09-16", "2026-09-30"):
+        response = await request(
+            path=f"{BASE_URL}/options",
+            query={"end_date": requested, "kind": "orgs"},
+            headers={"X-Source-Id": "S", "X-Bbk-Id": "004"},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "sync_date": "2026-09-20",
+            "items": [{"value": "04", "label": "新支行"}],
+        }
+    forbidden = await request(
+        path=f"{BASE_URL}/options",
+        query={"end_date": DATE, "kind": "orgs", "first_bbk_id": "004"},
+        headers={"X-Source-Id": "S", "X-Bbk-Id": "001"},
+    )
+    assert forbidden.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_options_return_empty_when_roster_has_no_dates(env):
+    env.raw.execute("DELETE FROM jkh_user_inf")
+    response = await request(
+        path=f"{BASE_URL}/options",
+        query={"end_date": DATE, "kind": "branches"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"sync_date": None, "items": []}
+
+
+@pytest.mark.asyncio
+async def test_permission_counts_default_missing_and_null_to_zero(
+    env, monkeypatch
+):
+    from monitor.app.services.report import task_type_snapshot as snapshot
+
+    async def missing_counts(*args):
+        return {("001", "01", "alice"): None}
+
+    monkeypatch.setattr(snapshot, "_fetch_permission_counts", missing_counts)
+    response = await request(
+        query={
+            "end_date": DATE,
+            "group_by": "manager",
+            "task_type": "push_plan",
+        }
+    )
+    assert response.status_code == 200
+    assert [
+        row["permission_manager_count"] for row in response.json()["items"]
+    ] == [0, 0]
+
+
+@pytest.mark.asyncio
+async def test_permission_left_join_keeps_unmatched_sources_but_counts_only_roster(
+    env,
+):
+    from monitor.app.services.report import task_type_snapshot as snapshot
+
+    env.raw.execute(
+        "INSERT INTO swe_tenant_init_source VALUES ('unlisted', 'S')"
+    )
+    env.raw.execute("DELETE FROM jkh_user_inf WHERE user_id = 'alice'")
+    counts = await snapshot._fetch_permission_counts(
+        env.connection, {"sync_date": DATE}, "S", "manager", {}
+    )
+    assert counts[("", "", "")] == 0
+    assert counts[("002", "01", "bob")] == 1
+    report = await service().get_report(params(group_by="manager"), "S", "100")
+    assert {
+        row.permission_manager_count
+        for row in report.items
+        if row.user_id == "alice"
+    } == {0}
+    overall = await service().get_report(params(), "S", "100")
+    assert {row.permission_manager_count for row in overall.items} == {1}
+    env.raw.execute("DELETE FROM jkh_user_inf")
+    empty = await service().get_report(params(), "S", "100")
+    assert {row.permission_manager_count for row in empty.items} == {0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["branch", "org", "manager"])
+async def test_skill_details_exclude_zero_counts_before_paging_and_export(
+    env, group
+):
+    env.raw.execute("DELETE FROM swe_task_type_report_snapshot")
+    dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
+    rows = [
+        snapshot_row(
+            f"{group}_skill",
+            {**dims, "skill_id": skill},
+            "push_plan",
+            skill_cnt=count,
+        )
+        for skill, count in (
+            ("a_zero", 0),
+            ("b_null", None),
+            ("c", 1),
+            ("d", 2),
+        )
+    ]
+    rows.append(snapshot_row(group, dims, "push_plan", skill_cnt=0))
+    env.raw.executemany(INSERT_SQL, rows)
+    query = {
+        "end_date": DATE,
+        "group_by": group,
+        "skill_detail": True,
+        "task_type": "push_plan",
+    }
+    paged = {"page": 1, "page_size": 1} if group == "manager" else {}
+    response = await request(query={**query, **paged})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert body["has_more"] is (group == "manager")
+    assert [row["skill_id"] for row in body["items"]] == (
+        ["c"] if group == "manager" else ["c", "d"]
+    )
+    if paged:
+        second = await request(query={**query, "page": 2, "page_size": 1})
+        assert [row["skill_id"] for row in second.json()["items"]] == ["d"]
+        assert second.json()["has_more"] is False
+    export = await request(path=f"{BASE_URL}/export", query=query)
+    assert export.status_code == 200
+    sheet = load_workbook(BytesIO(export.content)).active
+    assert sheet.max_row == 3
+    summary = await request(query={**query, "skill_detail": False})
+    assert summary.status_code == 200
+    assert summary.json()["total"] == 1
+    assert summary.json()["items"][0]["skill_count"] == 0
+    env.raw.execute("UPDATE swe_task_type_report_snapshot SET skill_cnt = 0")
+    empty = await request(query={**query, **paged})
+    assert empty.status_code == 200
+    assert empty.json()["items"] == []
+    assert empty.json()["total"] == 0
+    assert empty.json()["has_more"] is False
+    assert "no_matching_skills" in empty.json()["warnings"]
