@@ -70,7 +70,8 @@ CREATE TABLE swe_task_type_report_snapshot(
     first_bbk_nm TEXT DEFAULT '', org_nm TEXT DEFAULT '',
     user_name TEXT DEFAULT '', pst_lvl TEXT DEFAULT '', cn_name TEXT DEFAULT '',
     task_type_name TEXT DEFAULT '', skill_cnt INTEGER DEFAULT 0,
-    active_manager_cnt INTEGER, suc_execute_job INTEGER DEFAULT 0,
+    active_manager_cnt INTEGER, active_job_cnt INTEGER, paused_job_cnt INTEGER,
+    suc_execute_job INTEGER DEFAULT 0,
     read_tasks INTEGER DEFAULT 0, read_rate REAL,
     recommended_customers INTEGER, read_customer_cnt INTEGER,
     plan_read_rate REAL, insight_customer_cnt INTEGER,
@@ -253,7 +254,8 @@ async def test_combo_mapping_and_dimension_restore(env):
     assert row.sapid == "alice"
     assert row.skill_id == "k1"
     assert row.cn_name == "技能一"
-    assert row.permission_manager_count == 1
+    assert row.permission_manager_count is None
+    assert row.skill_count is None
     assert row.task_type == "push_plan"
     assert row.task_type_name == "推送(名单+方案)"
     assert "skill_rows_not_additive" in report.warnings
@@ -298,7 +300,7 @@ async def test_null_metrics_stay_null(env):
     assert rows[("ask_plan", "alice")].active_manager_count is None
     assert rows[("push_other", "alice")].recommended_customers is None
     assert rows[("push_plan", "alice")].recommended_customers == 4
-    assert rows[("push_plan", "alice")].active_manager_count == 1
+    assert rows[("push_plan", "alice")].active_manager_count is None
 
 
 @pytest.mark.asyncio
@@ -421,7 +423,7 @@ async def test_report_without_batch_table_keeps_permission_counts(env):
     response = await request(
         query={
             "end_date": DATE,
-            "group_by": "manager",
+            "group_by": "org",
             "task_type": "push_plan",
         }
     )
@@ -591,8 +593,8 @@ def seed_high_source(connection: sqlite3.Connection) -> None:
         "INSERT INTO swe_task_type_report_snapshot ("
         "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id,"
         " user_id, skill_id, first_bbk_nm, org_nm, user_name, pst_lvl,"
-        " cn_name, task_type_name, active_manager_cnt) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " cn_name, task_type_name, active_manager_cnt, skill_cnt) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
         [
             (
                 DATE, "G", "overall", "push_plan", "ALL", "ALL", "ALL", "ALL",
@@ -790,13 +792,13 @@ async def test_permission_counts_default_missing_and_null_to_zero(
     from monitor.app.services.report import task_type_snapshot as snapshot
 
     async def missing_counts(*args):
-        return {("001", "01", "alice"): None}
+        return {("001", "01"): None}
 
     monkeypatch.setattr(snapshot, "_fetch_permission_counts", missing_counts)
     response = await request(
         query={
             "end_date": DATE,
-            "group_by": "manager",
+            "group_by": "org",
             "task_type": "push_plan",
         }
     )
@@ -826,7 +828,7 @@ async def test_permission_left_join_keeps_unmatched_sources_but_counts_only_rost
         row.permission_manager_count
         for row in report.items
         if row.user_id == "alice"
-    } == {0}
+    } == {None}
     overall = await service().get_report(params(), "S", "100")
     assert {row.permission_manager_count for row in overall.items} == {1}
     env.raw.execute("DELETE FROM jkh_user_inf")
@@ -882,8 +884,9 @@ async def test_skill_details_exclude_zero_counts_before_paging_and_export(
     assert sheet.max_row == 3
     summary = await request(query={**query, "skill_detail": False})
     assert summary.status_code == 200
-    assert summary.json()["total"] == 1
-    assert summary.json()["items"][0]["skill_count"] == 0
+    assert summary.json()["total"] == (1 if group == "branch" else 0)
+    if group == "branch":
+        assert summary.json()["items"][0]["skill_count"] == 0
     env.raw.execute("UPDATE swe_task_type_report_snapshot SET skill_cnt = 0")
     empty = await request(query={**query, **paged})
     assert empty.status_code == 200
@@ -891,3 +894,124 @@ async def test_skill_details_exclude_zero_counts_before_paging_and_export(
     assert empty.json()["total"] == 0
     assert empty.json()["has_more"] is False
     assert "no_matching_skills" in empty.json()["warnings"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "group,detail",
+    [
+        ("branch", True),
+        ("org", True),
+        ("manager", True),
+        ("manager", False),
+    ],
+)
+async def test_unused_metrics_do_not_query(env, monkeypatch, group, detail):
+    from unittest.mock import AsyncMock
+    from monitor.app.services.report import task_type_snapshot as snapshot
+
+    permissions = AsyncMock(
+        side_effect=AssertionError("unused permission query")
+    )
+    monkeypatch.setattr(snapshot, "_fetch_permission_counts", permissions)
+    queries = []
+    env.raw.set_trace_callback(queries.append)
+    report = await service().get_report(
+        params(group_by=group, skill_detail=detail), "S", "100"
+    )
+    permissions.assert_not_awaited()
+    assert all(row.permission_manager_count is None for row in report.items)
+    selects = [
+        sql.split(" FROM ")[0]
+        for sql in queries
+        if "SELECT prt_dt," in sql and "rpt_combo" in sql
+    ]
+    assert selects
+    if detail:
+        assert all("skill_cnt" not in sql for sql in selects)
+        assert all(row.skill_count is None for row in report.items)
+    if group == "manager":
+        assert all("active_manager_cnt" not in sql for sql in selects)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detail", [False, True])
+@pytest.mark.parametrize("task_type", TASK_TYPES)
+async def test_manager_task_counts_and_export(env, detail, task_type):
+    env.raw.execute(
+        "UPDATE swe_task_type_report_snapshot SET active_job_cnt = 7, "
+        "paused_job_cnt = 2 WHERE task_type <> 'ask_plan'"
+    )
+    query = dict(
+        end_date=DATE,
+        group_by="manager",
+        skill_detail=detail,
+        task_type=task_type,
+    )
+    response = await request(query=query)
+    assert response.status_code == 200
+    row = response.json()["items"][0]
+    expected = [None, None] if task_type == "ask_plan" else [7, 2]
+    assert [row["active_task_count"], row["paused_task_count"]] == expected
+    assert row["permission_manager_count"] is None
+    assert row["active_manager_count"] is None
+    exported = await request(path=f"{BASE_URL}/export", query=query)
+    assert exported.status_code == 200
+    sheet = load_workbook(BytesIO(exported.content)).active
+    headers = [cell.value for cell in sheet[1]]
+    assert "有权限客户经理数" not in headers
+    assert "活跃客户经理数" not in headers
+    assert ("技能数" in headers) is not detail
+    start = headers.index("任务类型") + (1 if detail else 2)
+    assert headers[start : start + 2] == ["当前活跃任务数", "当前暂停任务数"]
+    assert [sheet.cell(2, start + i + 1).value for i in range(2)] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["org", "manager"])
+async def test_summary_zero_skills_filtered_before_total_and_export(
+    env, group
+):
+    env.raw.execute("DELETE FROM swe_task_type_report_snapshot")
+    rows = [
+        snapshot_row(
+            group,
+            dict(first_bbk_id="001", org_id=f"0{i}", user_id=f"user{i}"),
+            "push_plan",
+            skill_cnt=n,
+        )
+        for i, n in enumerate([0, None, 1, 2])
+    ]
+    env.raw.executemany(INSERT_SQL, rows)
+    query = dict(end_date=DATE, group_by=group, task_type="push_plan")
+    paging = dict(page=1, page_size=1) if group == "manager" else {}
+    response = await request(query={**query, **paging})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert body["has_more"] is (group == "manager")
+    assert [row["skill_count"] for row in body["items"]] == (
+        [1] if paging else [1, 2]
+    )
+    exported = await request(path=f"{BASE_URL}/export", query=query)
+    sheet = load_workbook(BytesIO(exported.content)).active
+    headers = [cell.value for cell in sheet[1]]
+    column = headers.index("技能数") + 1
+    assert sheet.max_row == 3
+    assert [sheet.cell(i, column).value for i in (2, 3)] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_org_permission_count_is_scoped_to_branch_and_org(env):
+    env.raw.execute(
+        "INSERT INTO jkh_user_inf VALUES(?,?,?,?,?,?,?,?)",
+        ("dave", DATE, "001", "02", "甲分行", "另一支行", "dave", "L1"),
+    )
+    env.raw.execute("INSERT INTO swe_tenant_init_source VALUES('dave', 'S')")
+    branch = await service().get_report(params(group_by="branch"), "S", "100")
+    assert branch.items[0].permission_manager_count == 2
+    org = await service().get_report(params(group_by="org"), "S", "100")
+    assert {
+        (row.first_bbk_id, row.org_id, row.permission_manager_count)
+        for row in org.items
+    } == {("001", "01", 1), ("002", "01", 1)}

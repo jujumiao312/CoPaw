@@ -36,9 +36,11 @@ export interface ReportRow {
   cn_name: string | null;
   task_type: TaskType;
   task_type_name: string;
-  skill_count: number;
-  permission_manager_count: number;
+  skill_count: number | null;
+  permission_manager_count: number | null;
   active_manager_count: number | null;
+  active_task_count?: number | null;
+  paused_task_count?: number | null;
   suc_execute_job: number;
   read_tasks: number;
   read_rate: number | null;

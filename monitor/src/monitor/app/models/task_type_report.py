@@ -100,9 +100,11 @@ class TaskTypeReportRow(BaseModel):
     cn_name: str | None = None
     task_type: ReportTaskType
     task_type_name: str
-    skill_count: Count
-    permission_manager_count: Count
+    skill_count: Count | None
+    permission_manager_count: Count | None
     active_manager_count: Count | None
+    active_task_count: Count | None = None
+    paused_task_count: Count | None = None
     suc_execute_job: Count
     read_tasks: Count
     read_rate: Percentage | None

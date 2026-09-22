@@ -14,7 +14,7 @@
 | 表结构 | `gauss/task_type_report_tdsql.sql`（建表语句 + 写入约定；权威结构是 `src/monitor/app/database/schema.py`） |
 | 数据写入 | 由现场作业自行写入，本仓库不提供装载脚本；写入方须按该文件第 3 节遵守列语义（`'ALL'`、NULL 规则），并保证对外查询时数据完整 |
 | 行覆盖 | 主键 `(prt_dt, source_id, dim_hash)`，同键 upsert 即幂等重写；源侧已消失的维度行若没被清掉会继续出数，属已确认取舍 |
-| 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口以当前 source 的 `swe_tenant_init_source` 为左表，LEFT JOIN 跑数日期 `end_date` 的 `jkh_user_inf`，按匹配到的 `user_id` 去重计算；技能明细组合沿用它所在层级的维度统计；当天名单或来源授权缺失、人数结果不存在或为 NULL 时相应人数为 0 |
+| 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口以当前 source 的 `swe_tenant_init_source` 为左表，LEFT JOIN 跑数日期 `end_date` 的 `jkh_user_inf`，按匹配到的 `user_id` 去重计算；仅总体/分行/支行汇总查询，技能明细及客户经理维度不查询并返回 null；支行按 first_bbk_id + org_id 统计该支行人数，而非整分行；当天名单或来源授权缺失、人数结果不存在或为 NULL 时相应人数为 0 |
 | 在线接口 | `/api/monitor/cron/task-type-report`、`/export`、`/options` 保持不变，仍按明细实时统计 |
 | 代码 | `routers/task_type_snapshot.py`、`services/report/task_type_snapshot.py`、`models/task_type_snapshot.py` |
 | 历史链路 | Hive 版（`hive/task_type_report_tdsql.sql`）保留作参考，其建表语句已过时，以 `schema.py` 为准 |
@@ -146,6 +146,15 @@
 
 需要“总体只在某分行范围内”的口径时，请用 `branch` 组合按分行筛选，或调用在线接口。
 
+### 指标适用范围（2026-09-22）
+
+- 技能明细不读取 `skill_cnt` 指标，`skill_count`、`permission_manager_count` 返回 `null`；仍使用 `skill_cnt > 0` 作为行有效性筛选。
+- 支行和客户经理汇总也在 SQL 层过滤 `skill_cnt > 0`，列表、分页 `total`、全量导出共用条件；总体/分行汇总保持原规则。
+- 客户经理汇总及技能明细不查询权限人数，`permission_manager_count`、`active_manager_count` 返回 `null`。
+- 客户经理新增 `active_task_count` ← `active_job_cnt`、`paused_task_count` ← `paused_job_cnt`；保留源表 `NULL`（主动提问无此指标），其他维度返回 `null`。
+- `org_name` 原样使用快照 `org_nm`，不追加分行名称。
+- 技能明细导出删除技能数及权限人数；经理导出在原权限人数、活跃经理人数位置依次放当前活跃任务数、当前暂停任务数。旧在线接口导出保持原契约。
+
 ## 4. 导出 GET /task-type/export
 
 与在线导出相同：必须指定 `task_type`，不能传 `page`/`page_size`，其余筛选参数与主查询一致。
@@ -203,7 +212,7 @@
    返回的全部 `items[].prt_dt` 都是有快照的日期，不再按 `status` 过滤；90 个日期窗口之前仍允许查询。
 3. 响应：行字段不变；如需提示“落盘口径”，读 `consistency` / `warnings` / `batch`。
 4. 机构筛选：按 3.4 的矩阵限制可选范围（例如总体汇总不允许选分行）。
-5. 空态：仅 `report_snapshot_not_found` 显示暂无出仓数据；其它错误显示失败信息，不再提示批次装载中。权限人数继续展示。
+5. 空态：仅 `report_snapshot_not_found` 显示暂无出仓数据；其它错误显示失败信息，不再提示批次装载中。权限人数仅在总体/分行/支行汇总展示。
 
 ## 9. 测试与运行
 

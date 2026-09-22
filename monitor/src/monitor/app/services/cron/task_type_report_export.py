@@ -37,6 +37,10 @@ DIMENSION_COLUMNS = {
 }
 # 技能明细只导出技能名称；技能 ID 由 Console 作为名称附注展示，不单列。
 SKILL_COLUMNS = ("cn_name",)
+MANAGER_TASK_COLUMNS = (
+    ("active_task_count", "当前活跃任务数"),
+    ("paused_task_count", "当前暂停任务数"),
+)
 # 指标列顺序固定；任务类型天然不产出的指标在组列时剔除。
 METRIC_COLUMNS = (
     ("skill_count", "技能数"),
@@ -67,6 +71,7 @@ LABELS = {
     "cn_name": "技能名称",
     "task_type_name": "任务类型",
     **dict(METRIC_COLUMNS),
+    **dict(MANAGER_TASK_COLUMNS),
 }
 
 
@@ -80,7 +85,7 @@ def missing_metrics(task_type: str) -> set[str]:
 
 
 def column_labels(
-    group_by: str, skill_detail: bool, task_type: str
+    group_by: str, skill_detail: bool, task_type: str, *, snapshot: bool = False
 ) -> list[tuple[str, str]]:
     """按对应报表取列，只保留该维度与该任务类型真实产出的字段。"""
     fields = list(DIMENSION_COLUMNS[group_by])
@@ -88,7 +93,13 @@ def column_labels(
         fields.extend(SKILL_COLUMNS)
     fields.append("task_type_name")
     missing = missing_metrics(task_type)
-    fields.extend(field for field, _ in METRIC_COLUMNS if field not in missing)
+    metrics = list(METRIC_COLUMNS)
+    if snapshot:
+        if skill_detail:
+            missing.update(("skill_count", "permission_manager_count"))
+        if group_by == "manager":
+            metrics[1:3] = MANAGER_TASK_COLUMNS
+    fields.extend(field for field, _ in metrics if field not in missing)
     return [(field, LABELS[field]) for field in fields]
 
 
@@ -112,7 +123,12 @@ def export_task_type_report(report, task_type: str) -> bytes:
             "report_export_too_large",
             "导出超过50000行，请缩小时间或机构范围。",
         )
-    columns = column_labels(report.group_by, report.skill_detail, task_type)
+    columns = column_labels(
+        report.group_by,
+        report.skill_detail,
+        task_type,
+        snapshot=report.consistency == "snapshot",
+    )
     workbook = Workbook(write_only=True)
     sheet = workbook.create_sheet(
         "技能明细" if report.skill_detail else "统计报表"

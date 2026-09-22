@@ -1,6 +1,6 @@
 # 任务类型报表落盘接口
 
-更新日期：2026-09-20。覆盖“高斯预聚合 → 装载 TDSQL → 落盘接口”这条链路的模块分工、
+更新日期：2026-09-22。覆盖“高斯预聚合 → 装载 TDSQL → 落盘接口”这条链路的模块分工、
 既定口径、修改指引与排查入口。指标口径真源仍是
 [DESIGN.md](../../docs/superpowers/specs/2026-09-13-jkh-task-report/DESIGN.md) 与
 [DIMENSIONS.md](../../docs/superpowers/specs/2026-09-13-jkh-task-report/DIMENSIONS.md)；
@@ -47,7 +47,7 @@
    主查询名单日期 `sync_date` 使用跑数日期 `end_date`，不做日期回退；options 独立读取名单，当天无名单时取最新有效日期，不要求有报表快照。
    Console 按日期接口返回的所有日期生成可选集合，不再检查 `status`；只有快照不存在的 404 显示空态，其它错误正常展示。
 5. **权限人数不入仓**：`permission_manager_count` 仍按跑数日期 `end_date` 的名单 +
-   当前 source 的初始化来源实时统计：以 `swe_tenant_init_source` 为左表 LEFT JOIN 当天名单，按匹配的 `user_id` 去重；组装时缺失或 NULL 人数置 0。不要把该列塞进落盘表。
+   当前 source 的初始化来源实时统计：以 `swe_tenant_init_source` 为左表 LEFT JOIN 当天名单，按匹配的 `user_id` 去重；仅总体/分行/支行汇总执行此查询，组装时缺失或 NULL 人数置 0；技能明细及经理维度不查询并返回 null。支行按分行号 + 支行号统计，非整分行人数。不要把该列塞进落盘表。
 6. **区间只支持当月**：落盘表是月累计快照，`start_date` 只允许等于当月 1 号；
    任意区间继续走在线接口，不要在服务层做“减法”。
 7. **分页与截断**：分页只在 `group_by=manager` 且指定 `task_type` 时可用；
@@ -76,7 +76,8 @@
 - 机构名解析、跨分行 403、名称歧义 422 仍查名单表（跑数日期 `end_date`），
   因此接口对名单有实时依赖，这不是漏改；
 - 技能明细各列仍不可相加，汇总取不带 `_skill` 的组合；
-- `skill_detail=true` 在 SQL 中过滤 `skill_cnt > 0`，零值与 NULL 行不返回，分页计数和导出共用该条件；普通汇总保留技能数为 0 的行。
+- 经理汇总/明细的 `active_task_count`、`paused_task_count` 映射现有 `active_job_cnt`、`paused_job_cnt`，保留 NULL；接口与导出均以两项任务数替换人数指标，其他维度任务数返回 null。
+- `skill_detail=true` 在 SQL 中过滤 `skill_cnt > 0`，零值与 NULL 行不返回，分页计数和导出共用该条件；支行/经理汇总也使用该过滤；仅总体/分行汇总保留技能数为 0 的行。技能明细不读取技能数指标，响应 skill_count=null。
 - `overall` 组合不支持任何机构筛选（落盘表没有“某分行的总体”这一行）。
 
 ## 5. 排查入口
@@ -116,6 +117,8 @@ WHERE prt_dt = '2026-09-17' AND source_id = 'RMASSIST'
 
 ## 6. 修改指引
 
+行装配中，`_row_dimensions` 负责维度转换，`_to_row` 负责指标映射；新增字段应放在对应函数，避免单个函数圈复杂度超过 15。
+
 | 新需求 | 修改位置 | 完成判据 |
 | --- | --- | --- |
 | 新增报表组合 | 数仓脚本第 4~6 段、`COMBO_MAP` / `EXPECTED_COMBOS` / `COMBO_DIM_COLUMNS`、`FILTER_REQUIRED_GROUPS`（如含新维度）、API.md | 组合标签一致、/status 不再报缺失、SQLite 与 ASGI 测试通过 |
@@ -137,7 +140,7 @@ WHERE prt_dt = '2026-09-17' AND source_id = 'RMASSIST'
 - 本次表结构已在本地真实 MySQL 5.7.33（TDSQL 5.7 兼容）上验证：建表（无自增主键、主键
   `(prt_dt, source_id, dim_hash)`）、历史库升级语句（加宽列 + 加 `dim_hash` + 换主键）、
   upsert 写入与重复覆盖、`'ALL'` / 空串 / NULL 语义、186 字符技能 ID、分页、关键字、
-  五个接口、XLSX 导出，以及有权限客户经理数在七个组合下的取值。
+  五个接口、XLSX 导出，以及权限人数适用范围、支行归属口径、经理任务数、零技能过滤和导出列顺序。
 - SQLite 只验证 SQL 形状与装配逻辑，不代表 TDSQL 方言、索引命中与真实耗时；
   上线前需在目标 TDSQL 执行 EXPLAIN 并核对接口耗时与导出体积。
 - 数据写入由现场作业负责（本仓库不含装载脚本）：写入方需要按建表文件第 3 节遵守列语义、

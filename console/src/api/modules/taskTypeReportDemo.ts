@@ -96,9 +96,14 @@ export function buildTaskReportDemo(params: ReportParams): ReportResponse {
               cn_name: skill?.[1] ?? null,
               task_type: task,
               task_type_name: taskNames[taskIndex],
-              skill_count: skill ? 1 : skills.length,
-              permission_manager_count: scale,
-              active_manager_count: task === "ask_plan" ? null : scale,
+              skill_count: skill ? null : skills.length,
+              permission_manager_count: skill || managerName ? null : scale,
+              active_manager_count:
+                managerName || task === "ask_plan" ? null : scale,
+              active_task_count:
+                managerName && task !== "ask_plan" ? scale * 3 : null,
+              paused_task_count:
+                managerName && task !== "ask_plan" ? scale : null,
               suc_execute_job: successful,
               read_tasks: read,
               read_rate: Number(((read / successful) * 100).toFixed(2)),

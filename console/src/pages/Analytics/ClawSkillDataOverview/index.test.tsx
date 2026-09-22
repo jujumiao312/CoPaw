@@ -4,11 +4,14 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import dayjs from "dayjs";
 import { request } from "../../../api/request";
 import ClawSkillDataOverview from "./index";
+import { buildTaskReportDemo } from "../../../api/modules/taskTypeReportDemo";
+import type { ReportGroup } from "../../../api/modules/taskTypeReport";
 
 vi.mock("../../../api/request", () => ({ request: vi.fn() }));
 vi.mock("../../../api/authHeaders", () => ({
@@ -83,6 +86,79 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+describe("ClawSkillDataOverview dimension columns", () => {
+  it.each(["branch", "org", "manager"] as const)(
+    "keeps %s summary and detail columns consistent with their scope",
+    async (group) => {
+      vi.mocked(request).mockImplementation(async (url) => {
+        const query = new URL(String(url), "http://localhost");
+        if (query.pathname.endsWith("/dates")) return emptyDates;
+        if (query.pathname.endsWith("/options")) return { items: [] };
+        const report = buildTaskReportDemo({
+          start_date: "2026-09-01",
+          end_date: "2026-09-14",
+          first_bbk_id: "110",
+          group_by: query.searchParams.get("group_by") as ReportGroup,
+          task_type: "push_plan",
+          skill_detail: query.searchParams.get("skill_detail") === "true",
+          user_id: query.searchParams.get("user_id") || undefined,
+          org_id: query.searchParams.get("org_id") || undefined,
+        });
+        return {
+          ...report,
+          items: report.items.slice(0, 1),
+          total: 1,
+          has_more: false,
+        };
+      });
+      await renderPage();
+      if (group !== "branch")
+        fireEvent.click(
+          screen.getByText(group === "org" ? "支行维度" : "客户经理维度"),
+        );
+      const summary = within(screen.getByRole("region", { name: "统计报表" }));
+      const headers = () =>
+        summary.getAllByRole("columnheader").map((cell) => cell.textContent);
+      expect(headers()).toContain("技能总数");
+      if (group === "manager") {
+        expect(headers().slice(5, 8)).toEqual([
+          "技能总数",
+          "当前活跃任务数",
+          "当前暂停任务数",
+        ]);
+        expect(headers()).not.toContain("有权限客户经理人数");
+        expect(headers()).not.toContain("活跃客户经理人数");
+        expect(await summary.findAllByText("演示经理1")).not.toHaveLength(0);
+      } else {
+        expect(headers()).toContain("有权限客户经理人数");
+        expect(headers()).toContain("活跃客户经理人数");
+      }
+      if (group === "org") {
+        expect(await summary.findByText("营业部")).toBeInTheDocument();
+        expect(summary.queryByText(/营业部 ·/)).not.toBeInTheDocument();
+      }
+      const buttons = await summary.findAllByRole("button", {
+        name: /查看.*的技能明细/,
+      });
+      fireEvent.click(buttons[0]);
+      const detail = within(screen.getByRole("region", { name: "技能明细" }));
+      const detailHeaders = detail
+        .getAllByRole("columnheader")
+        .map((cell) => cell.textContent);
+      expect(detailHeaders).not.toContain("技能总数");
+      expect(detailHeaders).not.toContain("有权限客户经理人数");
+      expect(detailHeaders).toContain(
+        group === "manager" ? "当前活跃任务数" : "活跃客户经理人数",
+      );
+      if (group === "manager") {
+        expect(detailHeaders).toContain("当前暂停任务数");
+        expect(detailHeaders).not.toContain("活跃客户经理人数");
+      }
+      expect(await detail.findByText("客户经营方案生成")).toBeInTheDocument();
+    },
+  );
+});
 
 describe("ClawSkillDataOverview report date filter", () => {
   it("queries the snapshot endpoint with the report date and its month start", async () => {

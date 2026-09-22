@@ -193,6 +193,11 @@ kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --ti
 
 ## Claw 技能运行看板
 
+- 当前技能看板入口为 `/analytics/claw-skill-data-overview`，组件为 `console/src/pages/Analytics/ClawSkillDataOverview/index.tsx`；当前适配器使用快照接口 `/api/monitor/report/task-type` 及其 `/options`、`/dates`、`/export`，下述旧路径记录仅供历史排查。
+- 2026-09-22 字段调整：技能明细不展示技能总数和有权限客户经理人数；客户经理主表与明细使用 `active_task_count`、`paused_task_count` 替换两个人数指标，空值显示“—”。支行名称不拼接分行名，但行标识仍包含分行号，避免同名支行混淆。
+- 支行权限人数由 `monitor/src/monitor/app/services/report/task_type_snapshot.py` 按 `first_bbk_id + org_id` 统计当前来源、名单日期的去重客户经理，并非整家分行人数。支行/经理汇总的零技能过滤必须在后端分页、total 与导出之前完成；前端不可仅隐藏当前页零值行。
+- 当前回归入口：`npm run test:run -- src/pages/Analytics/ClawSkillDataOverview src/api/modules/taskTypeReport.test.ts src/api/modules/taskTypeReportDemo.test.ts`。
+
 - 页面：`/analytics/claw-data-overview`；组件：`console/src/pages/Analytics/ClawDataOverview/index.tsx`。
 - 接口适配：`console/src/api/modules/taskTypeReport.ts`，使用共享 request 向 monitor 的 `/api/monitor/cron/task-type-report` 请求，继承来源与认证头。
 - 日期按同一自然月限制。使用实际认证头 `X-Bbk-Id`：100 可选全部分行，非100只显示本分行并锁定；缺失身份不请求。分行和支行级联选项从 `/task-type-report/options` 查询 `jkh_user_inf` 同一名单快照；切换分行清空支行。

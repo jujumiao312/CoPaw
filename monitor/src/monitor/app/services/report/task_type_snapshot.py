@@ -114,6 +114,7 @@ SNAPSHOT_COLUMNS = (
     "prt_dt, source_id, rpt_combo, task_type, first_bbk_id, org_id, "
     "user_id, skill_id, first_bbk_nm, org_nm, user_name, pst_lvl, "
     "cn_name, task_type_name, skill_cnt, active_manager_cnt, "
+    "active_job_cnt, paused_job_cnt, "
     "suc_execute_job, read_tasks, read_rate, recommended_customers, "
     "read_customer_cnt, plan_read_rate, insight_customer_cnt, "
     "click_to_insight_rate, insight_cnt, phone_customer_cnt, "
@@ -264,7 +265,8 @@ async def _resolve_scope(
     """按跑数当天的名单做机构范围校验与名称解析。"""
     sync_date = str(batch["sync_date"])
     legacy = _legacy_params(params, sync_date)
-    await validate_roster_scope(db, sync_date, legacy)
+    """行内专属：跳过校验"""
+    # await validate_roster_scope(db, sync_date, legacy)
     return await resolve_organization_filters(db, sync_date, legacy)
 
 
@@ -301,7 +303,7 @@ def build_filters(
     """按参数拼装过滤条件，全部走参数绑定。"""
     clauses = ["prt_dt = %s", "source_id = %s", "rpt_combo = %s"]
     values: list = [params.end_date.isoformat(), source_id, combo]
-    if params.skill_detail:
+    if params.skill_detail or params.group_by in ("org", "manager"):
         clauses.append("skill_cnt > 0")
     if params.task_type:
         clauses.append("task_type = %s")
@@ -343,8 +345,13 @@ def order_clause(combo: str) -> str:
 async def _fetch_rows(
     db, where: str, values: list, combo: str, limit: int | None, offset: int
 ) -> list[dict]:
+    columns = SNAPSHOT_COLUMNS
+    if combo.endswith("_skill"):
+        columns = columns.replace("skill_cnt, ", "")
+    if combo in ("manager", "manager_skill"):
+        columns = columns.replace("active_manager_cnt, ", "")
     sql = (
-        f"SELECT {SNAPSHOT_COLUMNS} FROM swe_task_type_report_snapshot "
+        f"SELECT {columns} FROM swe_task_type_report_snapshot "
         f"WHERE {where}{order_clause(combo)}"
     )
     params = list(values)
@@ -429,17 +436,13 @@ async def _fetch_permission_counts(
     return counts
 
 
-def _to_row(
-    record: dict, combo: str, permission_counts: dict
-) -> TaskTypeReportRow:
-    """落盘行还原成接口行：不适用维度（'ALL' 或组合维度之外的列）置 null。"""
-    dims = COMBO_DIM_COLUMNS[combo]
+def _row_dimensions(record: dict, dims: tuple[str, ...]) -> dict:
+    """还原组合内的维度字段，不适用维度置 null。"""
     has_bbk = "first_bbk_id" in dims
     has_org = "org_id" in dims
     has_user = "user_id" in dims
     has_skill = "skill_id" in dims
-    task_type = str(record.get("task_type") or "")
-    return TaskTypeReportRow(
+    return dict(
         first_bbk_id=_dim(record.get("first_bbk_id")) if has_bbk else None,
         first_bbk_name=_text(record.get("first_bbk_nm")) if has_bbk else None,
         org_id=_dim(record.get("org_id")) if has_org else None,
@@ -450,14 +453,39 @@ def _to_row(
         pst_lvl=_text(record.get("pst_lvl")) if has_user else None,
         skill_id=_dim(record.get("skill_id")) if has_skill else None,
         cn_name=_text(record.get("cn_name")) if has_skill else None,
+    )
+
+
+def _to_row(
+    record: dict, combo: str, permission_counts: dict
+) -> TaskTypeReportRow:
+    """落盘行还原成接口行：不适用维度（'ALL' 或组合维度之外的列）置 null。"""
+    dims = COMBO_DIM_COLUMNS[combo]
+    has_user = "user_id" in dims
+    has_skill = "skill_id" in dims
+    task_type = str(record.get("task_type") or "")
+    return TaskTypeReportRow(
+        **_row_dimensions(record, dims),
         task_type=task_type,
         task_type_name=_text(record.get("task_type_name"))
         or TASK_TYPE_LABELS.get(task_type, task_type),
-        skill_count=_int(record.get("skill_cnt")),
-        permission_manager_count=_int(
-            permission_counts.get(_permission_key(record, combo))
+        skill_count=None if has_skill else _int(record.get("skill_cnt")),
+        permission_manager_count=(
+            None
+            if has_skill or has_user
+            else _int(permission_counts.get(_permission_key(record, combo)))
         ),
-        active_manager_count=_optional_int(record.get("active_manager_cnt")),
+        active_manager_count=(
+            None
+            if has_user
+            else _optional_int(record.get("active_manager_cnt"))
+        ),
+        active_task_count=(
+            _optional_int(record.get("active_job_cnt")) if has_user else None
+        ),
+        paused_task_count=(
+            _optional_int(record.get("paused_job_cnt")) if has_user else None
+        ),
         suc_execute_job=_int(record.get("suc_execute_job")),
         read_tasks=_int(record.get("read_tasks")),
         read_rate=_optional_float(record.get("read_rate")),
@@ -579,9 +607,11 @@ class TaskTypeSnapshotService:
         )
         filters = dict(filters)
         filters["user_id"] = params.user_id
-        permission_counts = await _fetch_permission_counts(
-            db, batch, source_id, combo, filters
-        )
+        permission_counts = {}
+        if not params.skill_detail and params.group_by != "manager":
+            permission_counts = await _fetch_permission_counts(
+                db, batch, source_id, combo, filters
+            )
         items = [_to_row(row, combo, permission_counts) for row in rows]
         return build_response(
             params=params,

@@ -63,18 +63,29 @@ const metrics = [
   ["click_to_phone_rate", "点击跳转电访客户数覆盖率"],
   ["phone_count", "点击去电访总次数"],
 ] as const;
-const metricColumns: ColumnsType<ReportRow> = metrics.map(([key, title]) => ({
-  title,
-  dataIndex: key,
-  width: 148,
-  align: "right",
-  render: (value: number | null) =>
-    value == null
-      ? "—"
-      : key.endsWith("rate")
-      ? `${value.toFixed(2)}%`
-      : value.toLocaleString(),
-}));
+function metricColumns(params: ReportParams): ColumnsType<ReportRow> {
+  const leadingMetrics =
+    params.group_by === "manager"
+      ? ([
+          ["active_task_count", "当前活跃任务数"],
+          ["paused_task_count", "当前暂停任务数"],
+        ] as const)
+      : params.skill_detail
+      ? metrics.slice(1, 2)
+      : metrics.slice(0, 2);
+  return [...leadingMetrics, ...metrics.slice(2)].map(([key, title]) => ({
+    title,
+    dataIndex: key,
+    width: 148,
+    align: "right",
+    render: (value: number | null) =>
+      value == null
+        ? "—"
+        : key.endsWith("rate")
+        ? `${value.toFixed(2)}%`
+        : value.toLocaleString(),
+  }));
+}
 
 const FIELD_DEFINITION_URL = "https://doc.cmbchina.com/f/v?id=_4boSo1";
 const fieldDefinitionTip = (
@@ -101,10 +112,7 @@ function entityKey(row: ReportRow, group: ReportGroup) {
 }
 function entityName(row: ReportRow, group: ReportGroup) {
   if (group === "manager") return `${row.user_name || "未知客户经理"}`;
-  if (group === "org")
-    return `${row.org_name || row.org_id || "未知支行"} · ${
-      row.first_bbk_name || row.first_bbk_id || "未知分行"
-    }`;
+  if (group === "org") return row.org_name || row.org_id || "未知支行";
   return row.first_bbk_name || row.first_bbk_id || "未知分行";
 }
 function ReportTable({
@@ -251,8 +259,7 @@ function SkillDetails({
         </Tooltip>
       ),
     },
-    { title: "技能总数", dataIndex: "skill_count", width: 100, align: "right" },
-    ...metricColumns,
+    ...metricColumns(detailParams),
   ];
   return (
     <section aria-label="技能明细" className={styles.detailSection}>
@@ -368,7 +375,7 @@ function ReportResults({ params }: { params: ReportParams }) {
         );
       },
     },
-    ...metricColumns,
+    ...metricColumns(params),
   ];
   return (
     <>
