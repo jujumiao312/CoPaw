@@ -310,7 +310,7 @@ async def test_common_metrics_return_for_each_available_dimension(
         assert row.vld_ctc_cust_qty == 1
         assert row.vld_ctc_cust_rate == 2.25
         assert row.wlth_prod_buy_cm_qty_t1 == 3
-        assert row.insu_inc_t14 == 106.25
+        assert row.fnd_inc_t14 == 46.25
 
 
 @pytest.mark.asyncio
@@ -575,10 +575,10 @@ async def test_http_export_xlsx(env):
     headers = [cell.value for cell in sheet[1]]
     assert "有权限客户经理数" in headers
     permission_column = headers.index("有权限客户经理数") + 1
-    assert headers[-106] == "强接触客户数"
-    assert headers[-1] == "保险中收(T+14)"
-    assert sheet.cell(row=2, column=len(headers) - 105).value == 1
-    assert sheet.cell(row=2, column=len(headers)).value == 106.25
+    assert headers[-46] == "强接触客户数"
+    assert headers[-1] == "基金中收(T+14)"
+    assert sheet.cell(row=2, column=len(headers) - 45).value == 1
+    assert sheet.cell(row=2, column=len(headers)).value == 46.25
     assert sheet.cell(row=2, column=permission_column).value == 1
     skill_export = await request(
         path=f"{BASE_URL}/export",

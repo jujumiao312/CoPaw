@@ -39,25 +39,10 @@ COMMON_METRIC_BASE_FIELDS = (
     ("sfl_cust_asc_qty", "金葵花客户提升数"),
     ("wlth_inc", "财富中收"),
     ("fnd_prod_buy_cm_qty", "基金购买客户经理人数"),
-    ("dps_prod_buy_cm_qty", "存款购买客户经理人数"),
-    ("fp_prod_buy_cm_qty", "理财购买客户经理人数"),
-    ("insu_prod_buy_cm_qty", "保险购买客户经理人数"),
     ("fnd_prod_buy_cust_qty", "基金购买客户数"),
-    ("dps_prod_buy_cust_qty", "存款购买客户数"),
-    ("fp_prod_buy_cust_qty", "理财购买客户数"),
-    ("insu_prod_buy_cust_qty", "保险购买客户数"),
     ("fnd_prod_buy_amt", "基金购买金额"),
-    ("dps_prod_buy_amt", "存款购买金额"),
-    ("fp_prod_buy_amt", "理财购买金额"),
-    ("insu_prod_buy_amt", "保险购买金额"),
     ("fnd_aum_asc_amt", "基金AUM提升金额"),
-    ("dps_aum_asc_amt", "存款AUM提升金额"),
-    ("fp_aum_asc_amt", "理财AUM提升金额"),
-    ("insu_aum_asc_amt", "保险AUM提升金额"),
     ("fnd_inc", "基金中收"),
-    ("dps_inc", "存款中收"),
-    ("fp_inc", "理财中收"),
-    ("insu_inc", "保险中收"),
 )
 COMMON_METRIC_FIELDS = (
     "vld_ctc_cust_qty",
@@ -182,25 +167,10 @@ class TaskTypeReportRow(BaseModel):
     sfl_cust_asc_qty_t1: Count | None = None
     wlth_inc_t1: float | None = None
     fnd_prod_buy_cm_qty_t1: Count | None = None
-    dps_prod_buy_cm_qty_t1: Count | None = None
-    fp_prod_buy_cm_qty_t1: Count | None = None
-    insu_prod_buy_cm_qty_t1: Count | None = None
     fnd_prod_buy_cust_qty_t1: Count | None = None
-    dps_prod_buy_cust_qty_t1: Count | None = None
-    fp_prod_buy_cust_qty_t1: Count | None = None
-    insu_prod_buy_cust_qty_t1: Count | None = None
     fnd_prod_buy_amt_t1: float | None = None
-    dps_prod_buy_amt_t1: float | None = None
-    fp_prod_buy_amt_t1: float | None = None
-    insu_prod_buy_amt_t1: float | None = None
     fnd_aum_asc_amt_t1: float | None = None
-    dps_aum_asc_amt_t1: float | None = None
-    fp_aum_asc_amt_t1: float | None = None
-    insu_aum_asc_amt_t1: float | None = None
     fnd_inc_t1: float | None = None
-    dps_inc_t1: float | None = None
-    fp_inc_t1: float | None = None
-    insu_inc_t1: float | None = None
     # T+3
     wlth_prod_buy_cm_qty_t3: Count | None = None
     wlth_prod_buy_cust_qty_t3: Count | None = None
@@ -209,25 +179,10 @@ class TaskTypeReportRow(BaseModel):
     sfl_cust_asc_qty_t3: Count | None = None
     wlth_inc_t3: float | None = None
     fnd_prod_buy_cm_qty_t3: Count | None = None
-    dps_prod_buy_cm_qty_t3: Count | None = None
-    fp_prod_buy_cm_qty_t3: Count | None = None
-    insu_prod_buy_cm_qty_t3: Count | None = None
     fnd_prod_buy_cust_qty_t3: Count | None = None
-    dps_prod_buy_cust_qty_t3: Count | None = None
-    fp_prod_buy_cust_qty_t3: Count | None = None
-    insu_prod_buy_cust_qty_t3: Count | None = None
     fnd_prod_buy_amt_t3: float | None = None
-    dps_prod_buy_amt_t3: float | None = None
-    fp_prod_buy_amt_t3: float | None = None
-    insu_prod_buy_amt_t3: float | None = None
     fnd_aum_asc_amt_t3: float | None = None
-    dps_aum_asc_amt_t3: float | None = None
-    fp_aum_asc_amt_t3: float | None = None
-    insu_aum_asc_amt_t3: float | None = None
     fnd_inc_t3: float | None = None
-    dps_inc_t3: float | None = None
-    fp_inc_t3: float | None = None
-    insu_inc_t3: float | None = None
     # T+7
     wlth_prod_buy_cm_qty_t7: Count | None = None
     wlth_prod_buy_cust_qty_t7: Count | None = None
@@ -236,25 +191,10 @@ class TaskTypeReportRow(BaseModel):
     sfl_cust_asc_qty_t7: Count | None = None
     wlth_inc_t7: float | None = None
     fnd_prod_buy_cm_qty_t7: Count | None = None
-    dps_prod_buy_cm_qty_t7: Count | None = None
-    fp_prod_buy_cm_qty_t7: Count | None = None
-    insu_prod_buy_cm_qty_t7: Count | None = None
     fnd_prod_buy_cust_qty_t7: Count | None = None
-    dps_prod_buy_cust_qty_t7: Count | None = None
-    fp_prod_buy_cust_qty_t7: Count | None = None
-    insu_prod_buy_cust_qty_t7: Count | None = None
     fnd_prod_buy_amt_t7: float | None = None
-    dps_prod_buy_amt_t7: float | None = None
-    fp_prod_buy_amt_t7: float | None = None
-    insu_prod_buy_amt_t7: float | None = None
     fnd_aum_asc_amt_t7: float | None = None
-    dps_aum_asc_amt_t7: float | None = None
-    fp_aum_asc_amt_t7: float | None = None
-    insu_aum_asc_amt_t7: float | None = None
     fnd_inc_t7: float | None = None
-    dps_inc_t7: float | None = None
-    fp_inc_t7: float | None = None
-    insu_inc_t7: float | None = None
     # T+14
     wlth_prod_buy_cm_qty_t14: Count | None = None
     wlth_prod_buy_cust_qty_t14: Count | None = None
@@ -263,25 +203,10 @@ class TaskTypeReportRow(BaseModel):
     sfl_cust_asc_qty_t14: Count | None = None
     wlth_inc_t14: float | None = None
     fnd_prod_buy_cm_qty_t14: Count | None = None
-    dps_prod_buy_cm_qty_t14: Count | None = None
-    fp_prod_buy_cm_qty_t14: Count | None = None
-    insu_prod_buy_cm_qty_t14: Count | None = None
     fnd_prod_buy_cust_qty_t14: Count | None = None
-    dps_prod_buy_cust_qty_t14: Count | None = None
-    fp_prod_buy_cust_qty_t14: Count | None = None
-    insu_prod_buy_cust_qty_t14: Count | None = None
     fnd_prod_buy_amt_t14: float | None = None
-    dps_prod_buy_amt_t14: float | None = None
-    fp_prod_buy_amt_t14: float | None = None
-    insu_prod_buy_amt_t14: float | None = None
     fnd_aum_asc_amt_t14: float | None = None
-    dps_aum_asc_amt_t14: float | None = None
-    fp_aum_asc_amt_t14: float | None = None
-    insu_aum_asc_amt_t14: float | None = None
     fnd_inc_t14: float | None = None
-    dps_inc_t14: float | None = None
-    fp_inc_t14: float | None = None
-    insu_inc_t14: float | None = None
 
 
 class TaskTypeReportResponse(BaseModel):

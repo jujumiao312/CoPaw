@@ -138,25 +138,10 @@ const statMetricTitles = (() => {
     "金葵花客户提升数",
     "财富中收",
     "基金购买客户经理人数",
-    "存款购买客户经理人数",
-    "理财购买客户经理人数",
-    "保险购买客户经理人数",
     "基金购买客户数",
-    "存款购买客户数",
-    "理财购买客户数",
-    "保险购买客户数",
     "基金购买金额",
-    "存款购买金额",
-    "理财购买金额",
-    "保险购买金额",
     "基金AUM提升金额",
-    "存款AUM提升金额",
-    "理财AUM提升金额",
-    "保险AUM提升金额",
     "基金中收",
-    "存款中收",
-    "理财中收",
-    "保险中收",
   ];
   return [
     "强接触客户数",
@@ -224,10 +209,10 @@ describe("ClawSkillDataOverview dimension columns", () => {
       const phoneIndex = headers().indexOf("点击去电访总次数");
       expect(phoneIndex).toBeGreaterThan(-1);
       const appendedHeaders = headers().slice(phoneIndex + 1);
-      expect(appendedHeaders).toHaveLength(106);
+      expect(appendedHeaders).toHaveLength(46);
       expect(appendedHeaders).toEqual(statMetricTitles);
       expect(appendedHeaders[0]).toBe("强接触客户数");
-      expect(appendedHeaders[105]).toBe("保险中收(T+14)");
+      expect(appendedHeaders[45]).toBe("基金中收(T+14)");
       if (group === "manager") {
         expect(headers().slice(5, 8)).toEqual([
           "技能总数",
@@ -257,7 +242,7 @@ describe("ClawSkillDataOverview dimension columns", () => {
       const detailPhoneIndex = detailHeaders.indexOf("点击去电访总次数");
       expect(detailPhoneIndex).toBeGreaterThan(-1);
       const detailStatHeaders = detailHeaders.slice(detailPhoneIndex + 1);
-      expect(detailStatHeaders).toHaveLength(106);
+      expect(detailStatHeaders).toHaveLength(46);
       expect(detailStatHeaders).toEqual(statMetricTitles);
       expect(detailHeaders).not.toContain("有权限客户经理人数");
       expect(detailHeaders).toContain(
@@ -291,7 +276,7 @@ describe("ClawSkillDataOverview new stat metrics", () => {
         vld_ctc_cust_qty: 1234,
         vld_ctc_cust_rate: 12.34,
         wlth_prod_buy_cm_qty_t1: null,
-        insu_inc_t14: undefined,
+        fnd_inc_t14: undefined,
       };
       return {
         ...report,
@@ -307,7 +292,7 @@ describe("ClawSkillDataOverview new stat metrics", () => {
     expect(tableRow(summary, "强接触客户数")).toBe("1,234");
     expect(tableRow(summary, "强接触客户率")).toBe("12.34%");
     expect(tableRow(summary, "财富产品购买客户经理人数(T+1)")).toBe("—");
-    expect(tableRow(summary, "保险中收(T+14)")).toBe("—");
+    expect(tableRow(summary, "基金中收(T+14)")).toBe("—");
   }, 30000);
 });
 
