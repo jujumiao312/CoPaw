@@ -205,7 +205,11 @@ def seed(connection: sqlite3.Connection) -> int:
         f"{field} = ?" for field in COMMON_METRIC_FIELDS
     )
     common_values = tuple(
-        index if field in COMMON_METRIC_INT_FIELDS else index + 0.25
+        index
+        if field in COMMON_METRIC_INT_FIELDS
+        else (index + 0.25) / 100
+        if field == "vld_ctc_cust_rate"
+        else index + 0.25
         for index, field in enumerate(COMMON_METRIC_FIELDS, 1)
     )
     connection.execute(
@@ -308,7 +312,7 @@ async def test_common_metrics_return_for_each_available_dimension(
             for field in COMMON_METRIC_FIELDS
         )
         assert row.vld_ctc_cust_qty == 1
-        assert row.vld_ctc_cust_rate == 2.25
+        assert row.vld_ctc_cust_rate == pytest.approx(2.25)
         assert row.wlth_prod_buy_cm_qty_t1 == 3
         assert row.fnd_inc_t14 == 46.25
 
@@ -578,6 +582,10 @@ async def test_http_export_xlsx(env):
     assert headers[-46] == "强接触客户数"
     assert headers[-1] == "基金中收(T+14)"
     assert sheet.cell(row=2, column=len(headers) - 45).value == 1
+    rate_column = headers.index("强接触客户率") + 1
+    rate_cell = sheet.cell(row=2, column=rate_column)
+    assert rate_cell.value == pytest.approx(0.0225)
+    assert rate_cell.number_format == "0.00%"
     assert sheet.cell(row=2, column=len(headers)).value == 46.25
     assert sheet.cell(row=2, column=permission_column).value == 1
     skill_export = await request(

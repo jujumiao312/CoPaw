@@ -207,15 +207,18 @@ def _optional_float(value) -> float | None:
 
 
 def _common_metrics(record: dict) -> dict:
-    """通用转化指标不区分组合，整数与金额按 schema 类型还原。"""
-    return {
-        field: (
+    """通用指标按 schema 还原；原始强接触比率转成百分比数值。"""
+    metrics = {}
+    for field in COMMON_METRIC_FIELDS:
+        value = (
             _optional_int
             if field in COMMON_METRIC_INT_FIELDS
             else _optional_float
         )(record.get(field))
-        for field in COMMON_METRIC_FIELDS
-    }
+        if field == "vld_ctc_cust_rate" and value is not None:
+            value *= 100
+        metrics[field] = value
+    return metrics
 
 
 def _as_date(value) -> date | None:
