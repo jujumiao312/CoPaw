@@ -3,7 +3,7 @@
 
 列集合与当前导出的报表一一对应：维度列跟随 ``group_by``，技能明细只追加技能
 名称，任务类型天然不产出的指标（push_other 的客户方案、ask_plan 的活跃人数）
-不导出，避免整列恒空的字段混进文件。
+不导出，避免整列恒空的字段混进文件；落盘快照额外追加全维度通用转化指标。
 """
 
 from io import BytesIO
@@ -13,6 +13,10 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font, PatternFill
 
 from .task_type_report import ReportError
+from ...models.task_type_report import (
+    COMMON_METRIC_FIELDS,
+    COMMON_METRIC_LABELS,
+)
 from .task_type_report_rows import (
     LABELS as TASK_TYPE_LABELS,
     NULL_FIELDS,
@@ -76,6 +80,7 @@ LABELS = {
     "task_type_name": "任务类型",
     **dict(METRIC_COLUMNS),
     **dict(MANAGER_TASK_COLUMNS),
+    **COMMON_METRIC_LABELS,
 }
 
 
@@ -104,6 +109,8 @@ def column_labels(
         if group_by == "manager":
             metrics[1:3] = MANAGER_TASK_COLUMNS
     fields.extend(field for field, _ in metrics if field not in missing)
+    if snapshot:
+        fields.extend(COMMON_METRIC_FIELDS)
     return [(field, LABELS[field]) for field in fields]
 
 

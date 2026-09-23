@@ -16,7 +16,11 @@ from openpyxl import load_workbook
 
 from monitor.app._app import app
 from monitor.app.database import schema
-from monitor.app.models.task_type_report import ReportOptionsParams
+from monitor.app.models.task_type_report import (
+    COMMON_METRIC_FIELDS,
+    COMMON_METRIC_INT_FIELDS,
+    ReportOptionsParams,
+)
 from monitor.app.models.task_type_snapshot import SnapshotReportParams
 from monitor.app.services.cron import task_type_report as cron_report
 from monitor.app.services.report.task_type_snapshot import (
@@ -62,7 +66,11 @@ class SqliteConnection:
         self._connection.commit()
 
 
-SCHEMA = """
+COMMON_SCHEMA_COLUMNS = ",\n    ".join(
+    f"{field} {'INTEGER' if field in COMMON_METRIC_INT_FIELDS else 'REAL'}"
+    for field in COMMON_METRIC_FIELDS
+)
+SCHEMA = f"""
 CREATE TABLE swe_rm_claw_list_ind_stat(
     dw_dat_dt TEXT, source_id TEXT,
     rpt_combo TEXT, job_type TEXT, frs_bbk_org_id TEXT DEFAULT '',
@@ -78,7 +86,9 @@ CREATE TABLE swe_rm_claw_list_ind_stat(
     plan_read_rate REAL, insight_customer_cnt INTEGER,
     click_to_insight_rate REAL, insight_cnt INTEGER,
     phone_customer_cnt INTEGER, click_to_phone_rate REAL,
-    phone_cnt INTEGER, stat_start_dt TEXT, stat_end_dt TEXT);
+    phone_cnt INTEGER,
+    {COMMON_SCHEMA_COLUMNS},
+    stat_start_dt TEXT, stat_end_dt TEXT);
 CREATE TABLE jkh_user_inf(user_id TEXT, sync_date TEXT, first_bbk_id TEXT,
     org_id TEXT, first_bbk_nm TEXT, org_nm TEXT, user_name TEXT,
     pst_lvl TEXT);
@@ -191,6 +201,17 @@ def seed(connection: sqlite3.Connection) -> int:
                 )
             )
     connection.executemany(INSERT_SQL, rows)
+    common_assignments = ", ".join(
+        f"{field} = ?" for field in COMMON_METRIC_FIELDS
+    )
+    common_values = tuple(
+        index if field in COMMON_METRIC_INT_FIELDS else index + 0.25
+        for index, field in enumerate(COMMON_METRIC_FIELDS, 1)
+    )
+    connection.execute(
+        f"UPDATE swe_rm_claw_list_ind_stat SET {common_assignments}",
+        common_values,
+    )
     connection.execute(
         "INSERT INTO swe_rm_claw_list_ind_stat ("
         "dw_dat_dt, source_id, rpt_combo, job_type, frs_bbk_org_id, "
@@ -261,6 +282,35 @@ async def test_combo_mapping_and_dimension_restore(env):
     assert row.task_type_name == "推送(名单+方案)"
     assert "skill_rows_not_additive" in report.warnings
     assert "snapshot_month_to_date" in report.warnings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "group_by,skill_detail",
+    [
+        ("branch", False),
+        ("org", False),
+        ("manager", False),
+        ("branch", True),
+        ("manager", True),
+    ],
+)
+async def test_common_metrics_return_for_each_available_dimension(
+    env, group_by, skill_detail
+):
+    report = await service().get_report(
+        params(group_by=group_by, skill_detail=skill_detail), "S", "100"
+    )
+    assert report.items
+    for row in report.items:
+        assert all(
+            getattr(row, field) is not None
+            for field in COMMON_METRIC_FIELDS
+        )
+        assert row.vld_ctc_cust_qty == 1
+        assert row.vld_ctc_cust_rate == 2.25
+        assert row.wlth_prod_buy_cm_qty_t1 == 3
+        assert row.insu_inc_t14 == 106.25
 
 
 @pytest.mark.asyncio
@@ -525,6 +575,10 @@ async def test_http_export_xlsx(env):
     headers = [cell.value for cell in sheet[1]]
     assert "有权限客户经理数" in headers
     permission_column = headers.index("有权限客户经理数") + 1
+    assert headers[-106] == "强接触客户数"
+    assert headers[-1] == "保险中收(T+14)"
+    assert sheet.cell(row=2, column=len(headers) - 105).value == 1
+    assert sheet.cell(row=2, column=len(headers)).value == 106.25
     assert sheet.cell(row=2, column=permission_column).value == 1
     skill_export = await request(
         path=f"{BASE_URL}/export",
@@ -690,7 +744,7 @@ def test_selected_columns_exist_in_table_ddl():
     def declared_columns(ddl: str) -> set[str]:
         return set(
             re.findall(
-                r"^\s*`?([a-z_]+)`?\s+"
+                r"^\s*`?([a-z0-9_]+)`?\s+"
                 r"(?:BIGINT|DATE|DATETIME|VARCHAR|DECIMAL|CHAR)\b",
                 ddl,
                 re.M,

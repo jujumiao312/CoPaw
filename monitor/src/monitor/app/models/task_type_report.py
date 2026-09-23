@@ -29,6 +29,61 @@ Percentage = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 MAX_REPORT_DAYS = 93
 
 
+COMMON_METRIC_PERIODS = ("t1", "t3", "t7", "t14")
+# 落盘表通用转化指标：字段顺序与 swe_rm_claw_list_ind_stat 保持一致。
+COMMON_METRIC_BASE_FIELDS = (
+    ("wlth_prod_buy_cm_qty", "财富产品购买客户经理人数"),
+    ("wlth_prod_buy_cust_qty", "财富产品购买客户数"),
+    ("wlth_prod_buy_amt", "财富产品购买金额"),
+    ("aum_asc_amt", "AUM提升金额"),
+    ("sfl_cust_asc_qty", "金葵花客户提升数"),
+    ("wlth_inc", "财富中收"),
+    ("fnd_prod_buy_cm_qty", "基金购买客户经理人数"),
+    ("dps_prod_buy_cm_qty", "存款购买客户经理人数"),
+    ("fp_prod_buy_cm_qty", "理财购买客户经理人数"),
+    ("insu_prod_buy_cm_qty", "保险购买客户经理人数"),
+    ("fnd_prod_buy_cust_qty", "基金购买客户数"),
+    ("dps_prod_buy_cust_qty", "存款购买客户数"),
+    ("fp_prod_buy_cust_qty", "理财购买客户数"),
+    ("insu_prod_buy_cust_qty", "保险购买客户数"),
+    ("fnd_prod_buy_amt", "基金购买金额"),
+    ("dps_prod_buy_amt", "存款购买金额"),
+    ("fp_prod_buy_amt", "理财购买金额"),
+    ("insu_prod_buy_amt", "保险购买金额"),
+    ("fnd_aum_asc_amt", "基金AUM提升金额"),
+    ("dps_aum_asc_amt", "存款AUM提升金额"),
+    ("fp_aum_asc_amt", "理财AUM提升金额"),
+    ("insu_aum_asc_amt", "保险AUM提升金额"),
+    ("fnd_inc", "基金中收"),
+    ("dps_inc", "存款中收"),
+    ("fp_inc", "理财中收"),
+    ("insu_inc", "保险中收"),
+)
+COMMON_METRIC_FIELDS = (
+    "vld_ctc_cust_qty",
+    "vld_ctc_cust_rate",
+    *(
+        f"{name}_{period}"
+        for period in COMMON_METRIC_PERIODS
+        for name, _ in COMMON_METRIC_BASE_FIELDS
+    ),
+)
+COMMON_METRIC_LABELS = {
+    "vld_ctc_cust_qty": "强接触客户数",
+    "vld_ctc_cust_rate": "强接触客户率",
+    **{
+        f"{name}_{period}": f"{label}(T+{period[1:]})"
+        for period in COMMON_METRIC_PERIODS
+        for name, label in COMMON_METRIC_BASE_FIELDS
+    },
+}
+COMMON_METRIC_INT_FIELDS = frozenset(
+    field
+    for field in COMMON_METRIC_FIELDS
+    if field == "vld_ctc_cust_qty" or "_qty_" in field
+)
+
+
 def _strict_date(value: object) -> date:
     if type(value) is date:
         return value
@@ -117,6 +172,116 @@ class TaskTypeReportRow(BaseModel):
     phone_customer_count: Count | None
     click_to_phone_rate: Percentage | None
     phone_count: Count | None
+    vld_ctc_cust_qty: Count | None = None
+    vld_ctc_cust_rate: Percentage | None = None
+    # T+1
+    wlth_prod_buy_cm_qty_t1: Count | None = None
+    wlth_prod_buy_cust_qty_t1: Count | None = None
+    wlth_prod_buy_amt_t1: float | None = None
+    aum_asc_amt_t1: float | None = None
+    sfl_cust_asc_qty_t1: Count | None = None
+    wlth_inc_t1: float | None = None
+    fnd_prod_buy_cm_qty_t1: Count | None = None
+    dps_prod_buy_cm_qty_t1: Count | None = None
+    fp_prod_buy_cm_qty_t1: Count | None = None
+    insu_prod_buy_cm_qty_t1: Count | None = None
+    fnd_prod_buy_cust_qty_t1: Count | None = None
+    dps_prod_buy_cust_qty_t1: Count | None = None
+    fp_prod_buy_cust_qty_t1: Count | None = None
+    insu_prod_buy_cust_qty_t1: Count | None = None
+    fnd_prod_buy_amt_t1: float | None = None
+    dps_prod_buy_amt_t1: float | None = None
+    fp_prod_buy_amt_t1: float | None = None
+    insu_prod_buy_amt_t1: float | None = None
+    fnd_aum_asc_amt_t1: float | None = None
+    dps_aum_asc_amt_t1: float | None = None
+    fp_aum_asc_amt_t1: float | None = None
+    insu_aum_asc_amt_t1: float | None = None
+    fnd_inc_t1: float | None = None
+    dps_inc_t1: float | None = None
+    fp_inc_t1: float | None = None
+    insu_inc_t1: float | None = None
+    # T+3
+    wlth_prod_buy_cm_qty_t3: Count | None = None
+    wlth_prod_buy_cust_qty_t3: Count | None = None
+    wlth_prod_buy_amt_t3: float | None = None
+    aum_asc_amt_t3: float | None = None
+    sfl_cust_asc_qty_t3: Count | None = None
+    wlth_inc_t3: float | None = None
+    fnd_prod_buy_cm_qty_t3: Count | None = None
+    dps_prod_buy_cm_qty_t3: Count | None = None
+    fp_prod_buy_cm_qty_t3: Count | None = None
+    insu_prod_buy_cm_qty_t3: Count | None = None
+    fnd_prod_buy_cust_qty_t3: Count | None = None
+    dps_prod_buy_cust_qty_t3: Count | None = None
+    fp_prod_buy_cust_qty_t3: Count | None = None
+    insu_prod_buy_cust_qty_t3: Count | None = None
+    fnd_prod_buy_amt_t3: float | None = None
+    dps_prod_buy_amt_t3: float | None = None
+    fp_prod_buy_amt_t3: float | None = None
+    insu_prod_buy_amt_t3: float | None = None
+    fnd_aum_asc_amt_t3: float | None = None
+    dps_aum_asc_amt_t3: float | None = None
+    fp_aum_asc_amt_t3: float | None = None
+    insu_aum_asc_amt_t3: float | None = None
+    fnd_inc_t3: float | None = None
+    dps_inc_t3: float | None = None
+    fp_inc_t3: float | None = None
+    insu_inc_t3: float | None = None
+    # T+7
+    wlth_prod_buy_cm_qty_t7: Count | None = None
+    wlth_prod_buy_cust_qty_t7: Count | None = None
+    wlth_prod_buy_amt_t7: float | None = None
+    aum_asc_amt_t7: float | None = None
+    sfl_cust_asc_qty_t7: Count | None = None
+    wlth_inc_t7: float | None = None
+    fnd_prod_buy_cm_qty_t7: Count | None = None
+    dps_prod_buy_cm_qty_t7: Count | None = None
+    fp_prod_buy_cm_qty_t7: Count | None = None
+    insu_prod_buy_cm_qty_t7: Count | None = None
+    fnd_prod_buy_cust_qty_t7: Count | None = None
+    dps_prod_buy_cust_qty_t7: Count | None = None
+    fp_prod_buy_cust_qty_t7: Count | None = None
+    insu_prod_buy_cust_qty_t7: Count | None = None
+    fnd_prod_buy_amt_t7: float | None = None
+    dps_prod_buy_amt_t7: float | None = None
+    fp_prod_buy_amt_t7: float | None = None
+    insu_prod_buy_amt_t7: float | None = None
+    fnd_aum_asc_amt_t7: float | None = None
+    dps_aum_asc_amt_t7: float | None = None
+    fp_aum_asc_amt_t7: float | None = None
+    insu_aum_asc_amt_t7: float | None = None
+    fnd_inc_t7: float | None = None
+    dps_inc_t7: float | None = None
+    fp_inc_t7: float | None = None
+    insu_inc_t7: float | None = None
+    # T+14
+    wlth_prod_buy_cm_qty_t14: Count | None = None
+    wlth_prod_buy_cust_qty_t14: Count | None = None
+    wlth_prod_buy_amt_t14: float | None = None
+    aum_asc_amt_t14: float | None = None
+    sfl_cust_asc_qty_t14: Count | None = None
+    wlth_inc_t14: float | None = None
+    fnd_prod_buy_cm_qty_t14: Count | None = None
+    dps_prod_buy_cm_qty_t14: Count | None = None
+    fp_prod_buy_cm_qty_t14: Count | None = None
+    insu_prod_buy_cm_qty_t14: Count | None = None
+    fnd_prod_buy_cust_qty_t14: Count | None = None
+    dps_prod_buy_cust_qty_t14: Count | None = None
+    fp_prod_buy_cust_qty_t14: Count | None = None
+    insu_prod_buy_cust_qty_t14: Count | None = None
+    fnd_prod_buy_amt_t14: float | None = None
+    dps_prod_buy_amt_t14: float | None = None
+    fp_prod_buy_amt_t14: float | None = None
+    insu_prod_buy_amt_t14: float | None = None
+    fnd_aum_asc_amt_t14: float | None = None
+    dps_aum_asc_amt_t14: float | None = None
+    fp_aum_asc_amt_t14: float | None = None
+    insu_aum_asc_amt_t14: float | None = None
+    fnd_inc_t14: float | None = None
+    dps_inc_t14: float | None = None
+    fp_inc_t14: float | None = None
+    insu_inc_t14: float | None = None
 
 
 class TaskTypeReportResponse(BaseModel):

@@ -24,6 +24,8 @@ import logging
 from datetime import date
 
 from ...models.task_type_report import (
+    COMMON_METRIC_FIELDS,
+    COMMON_METRIC_INT_FIELDS,
     ReportOption,
     ReportOptionsParams,
     ReportOptionsResponse,
@@ -140,7 +142,8 @@ SNAPSHOT_LOGICAL_COLUMNS = (
     "suc_execute_job", "read_tasks", "read_rate", "recommended_customers",
     "read_customer_cnt", "plan_read_rate", "insight_customer_cnt",
     "click_to_insight_rate", "insight_cnt", "phone_customer_cnt",
-    "click_to_phone_rate", "phone_cnt", "stat_start_dt", "stat_end_dt",
+    "click_to_phone_rate", "phone_cnt", *COMMON_METRIC_FIELDS,
+    "stat_start_dt", "stat_end_dt",
 )
 SNAPSHOT_SOURCE_COLUMNS = tuple(
     _physical_column(column) for column in SNAPSHOT_LOGICAL_COLUMNS
@@ -201,6 +204,18 @@ def _optional_int(value) -> int | None:
 
 def _optional_float(value) -> float | None:
     return None if value is None else float(value)
+
+
+def _common_metrics(record: dict) -> dict:
+    """通用转化指标不区分组合，整数与金额按 schema 类型还原。"""
+    return {
+        field: (
+            _optional_int
+            if field in COMMON_METRIC_INT_FIELDS
+            else _optional_float
+        )(record.get(field))
+        for field in COMMON_METRIC_FIELDS
+    }
 
 
 def _as_date(value) -> date | None:
@@ -501,6 +516,7 @@ def _to_row(
     task_type = str(record.get("task_type") or "")
     return TaskTypeReportRow(
         **_row_dimensions(record, dims),
+        **_common_metrics(record),
         task_type=task_type,
         task_type_name=_text(record.get("task_type_name"))
         or TASK_TYPE_LABELS.get(task_type, task_type),

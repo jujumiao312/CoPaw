@@ -47,7 +47,7 @@ const tasks: { label: string; value: TaskType }[] = [
   { label: "主动提问（名单+方案）", value: "ask_plan" },
   { label: "推送（非名单方案）", value: "push_other" },
 ];
-const metrics = [
+const leadingMetrics = [
   ["permission_manager_count", "有权限客户经理人数"],
   ["active_manager_count", "活跃客户经理人数"],
   ["suc_execute_job", "成功执行任务数"],
@@ -63,6 +63,50 @@ const metrics = [
   ["click_to_phone_rate", "点击跳转电访客户数覆盖率"],
   ["phone_count", "点击去电访总次数"],
 ] as const;
+const statMetricBases = [
+  ["wlth_prod_buy_cm_qty", "财富产品购买客户经理人数"],
+  ["wlth_prod_buy_cust_qty", "财富产品购买客户数"],
+  ["wlth_prod_buy_amt", "财富产品购买金额"],
+  ["aum_asc_amt", "AUM提升金额"],
+  ["sfl_cust_asc_qty", "金葵花客户提升数"],
+  ["wlth_inc", "财富中收"],
+  ["fnd_prod_buy_cm_qty", "基金购买客户经理人数"],
+  ["dps_prod_buy_cm_qty", "存款购买客户经理人数"],
+  ["fp_prod_buy_cm_qty", "理财购买客户经理人数"],
+  ["insu_prod_buy_cm_qty", "保险购买客户经理人数"],
+  ["fnd_prod_buy_cust_qty", "基金购买客户数"],
+  ["dps_prod_buy_cust_qty", "存款购买客户数"],
+  ["fp_prod_buy_cust_qty", "理财购买客户数"],
+  ["insu_prod_buy_cust_qty", "保险购买客户数"],
+  ["fnd_prod_buy_amt", "基金购买金额"],
+  ["dps_prod_buy_amt", "存款购买金额"],
+  ["fp_prod_buy_amt", "理财购买金额"],
+  ["insu_prod_buy_amt", "保险购买金额"],
+  ["fnd_aum_asc_amt", "基金AUM提升金额"],
+  ["dps_aum_asc_amt", "存款AUM提升金额"],
+  ["fp_aum_asc_amt", "理财AUM提升金额"],
+  ["insu_aum_asc_amt", "保险AUM提升金额"],
+  ["fnd_inc", "基金中收"],
+  ["dps_inc", "存款中收"],
+  ["fp_inc", "理财中收"],
+  ["insu_inc", "保险中收"],
+] as const;
+const statPeriods = [
+  ["_t1", "(T+1)"],
+  ["_t3", "(T+3)"],
+  ["_t7", "(T+7)"],
+  ["_t14", "(T+14)"],
+] as const;
+const statMetrics = [
+  ["vld_ctc_cust_qty", "强接触客户数"],
+  ["vld_ctc_cust_rate", "强接触客户率"],
+  ...statPeriods.flatMap(([suffix, title]) =>
+    statMetricBases.map(
+      ([key, label]) => [`${key}${suffix}`, `${label}${title}`] as const,
+    ),
+  ),
+] as const;
+const metrics = [...leadingMetrics, ...statMetrics];
 const METRIC_COLUMN_MIN_WIDTH = 96;
 const METRIC_COLUMN_MAX_WIDTH = 150;
 /** 指标列按列名长度取宽，短列名不占位，长列名允许表头折行。 */

@@ -23,7 +23,40 @@ export interface ReportParams {
   page?: number;
   page_size?: number;
 }
-export interface ReportRow {
+type ClawPeriodSuffix = "_t1" | "_t3" | "_t7" | "_t14";
+type ClawPeriodMetric =
+  | "wlth_prod_buy_cm_qty"
+  | "wlth_prod_buy_cust_qty"
+  | "wlth_prod_buy_amt"
+  | "aum_asc_amt"
+  | "sfl_cust_asc_qty"
+  | "wlth_inc"
+  | "fnd_prod_buy_cm_qty"
+  | "dps_prod_buy_cm_qty"
+  | "fp_prod_buy_cm_qty"
+  | "insu_prod_buy_cm_qty"
+  | "fnd_prod_buy_cust_qty"
+  | "dps_prod_buy_cust_qty"
+  | "fp_prod_buy_cust_qty"
+  | "insu_prod_buy_cust_qty"
+  | "fnd_prod_buy_amt"
+  | "dps_prod_buy_amt"
+  | "fp_prod_buy_amt"
+  | "insu_prod_buy_amt"
+  | "fnd_aum_asc_amt"
+  | "dps_aum_asc_amt"
+  | "fp_aum_asc_amt"
+  | "insu_aum_asc_amt"
+  | "fnd_inc"
+  | "dps_inc"
+  | "fp_inc"
+  | "insu_inc";
+type ClawStatMetric =
+  | "vld_ctc_cust_qty"
+  | "vld_ctc_cust_rate"
+  | `${ClawPeriodMetric}${ClawPeriodSuffix}`;
+
+export type ReportRow = {
   first_bbk_id: string | null;
   first_bbk_name: string | null;
   org_id: string | null;
@@ -53,7 +86,7 @@ export interface ReportRow {
   phone_customer_count: number | null;
   click_to_phone_rate: number | null;
   phone_count: number | null;
-}
+} & Partial<Record<ClawStatMetric, number | null>>;
 export interface ReportResponse {
   sync_date: string | null;
   warnings: string[];

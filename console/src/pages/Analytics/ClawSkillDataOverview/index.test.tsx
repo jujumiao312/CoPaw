@@ -8,13 +8,67 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import dayjs from "dayjs";
+import type { ReactNode } from "react";
 import { request } from "../../../api/request";
 import ClawSkillDataOverview from "./index";
 import { reportExportFilename } from "./reportExportFilename";
 import { buildTaskReportDemo } from "../../../api/modules/taskTypeReportDemo";
-import type { ReportGroup } from "../../../api/modules/taskTypeReport";
+import type {
+  ReportGroup,
+  ReportRow,
+} from "../../../api/modules/taskTypeReport";
 
 vi.mock("../../../api/request", () => ({ request: vi.fn() }));
+vi.mock("antd", async (importOriginal) => {
+  const antd = await importOriginal<typeof import("antd")>();
+  return {
+    ...antd,
+    Table: ({
+      columns,
+      dataSource,
+      locale,
+      rowKey,
+    }: {
+      columns: {
+        title?: ReactNode;
+        dataIndex?: string;
+        render?: (value: unknown, row: ReportRow) => ReactNode;
+      }[];
+      dataSource: ReportRow[];
+      locale?: { emptyText?: ReactNode };
+      rowKey: (row: ReportRow) => string;
+    }) => (
+      <table>
+        <thead>
+          <tr>
+            {columns.map((column, index) => (
+              <th key={index}>{column.title}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dataSource.length === 0 ? (
+            <tr>
+              <td colSpan={columns.length}>{locale?.emptyText}</td>
+            </tr>
+          ) : (
+            dataSource.map((row) => (
+              <tr key={rowKey(row)}>
+                {columns.map((column, index) => (
+                  <td key={index}>
+                    {column.render
+                      ? column.render(row[column.dataIndex ?? ""], row)
+                      : String(row[column.dataIndex ?? ""] ?? "")}
+                  </td>
+                ))}
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    ),
+  };
+});
 vi.mock("../../../api/authHeaders", () => ({
   buildAuthHeaders: () => ({ "X-Bbk-Id": "100", "X-Source-Id": "RMASSIST" }),
 }));
@@ -75,6 +129,51 @@ async function openDatePanel(input: HTMLElement) {
   );
 }
 
+const statMetricTitles = (() => {
+  const bases = [
+    "财富产品购买客户经理人数",
+    "财富产品购买客户数",
+    "财富产品购买金额",
+    "AUM提升金额",
+    "金葵花客户提升数",
+    "财富中收",
+    "基金购买客户经理人数",
+    "存款购买客户经理人数",
+    "理财购买客户经理人数",
+    "保险购买客户经理人数",
+    "基金购买客户数",
+    "存款购买客户数",
+    "理财购买客户数",
+    "保险购买客户数",
+    "基金购买金额",
+    "存款购买金额",
+    "理财购买金额",
+    "保险购买金额",
+    "基金AUM提升金额",
+    "存款AUM提升金额",
+    "理财AUM提升金额",
+    "保险AUM提升金额",
+    "基金中收",
+    "存款中收",
+    "理财中收",
+    "保险中收",
+  ];
+  return [
+    "强接触客户数",
+    "强接触客户率",
+    ...["(T+1)", "(T+3)", "(T+7)", "(T+14)"].flatMap((period) =>
+      bases.map((base) => `${base}${period}`),
+    ),
+  ];
+})();
+
+function tableRow(region: ReturnType<typeof within>, header: string) {
+  const headers = region.getAllByRole("columnheader");
+  const index = headers.findIndex((cell) => cell.textContent === header);
+  const cells = region.getAllByRole("row")[1]?.querySelectorAll("td");
+  return cells?.[index]?.textContent;
+}
+
 async function renderPage() {
   const view = render(<ClawSkillDataOverview />);
   await waitFor(() => expect(reportQueries().length).toBeGreaterThan(0));
@@ -122,6 +221,13 @@ describe("ClawSkillDataOverview dimension columns", () => {
       const headers = () =>
         summary.getAllByRole("columnheader").map((cell) => cell.textContent);
       expect(headers()).toContain("技能总数");
+      const phoneIndex = headers().indexOf("点击去电访总次数");
+      expect(phoneIndex).toBeGreaterThan(-1);
+      const appendedHeaders = headers().slice(phoneIndex + 1);
+      expect(appendedHeaders).toHaveLength(106);
+      expect(appendedHeaders).toEqual(statMetricTitles);
+      expect(appendedHeaders[0]).toBe("强接触客户数");
+      expect(appendedHeaders[105]).toBe("保险中收(T+14)");
       if (group === "manager") {
         expect(headers().slice(5, 8)).toEqual([
           "技能总数",
@@ -148,6 +254,11 @@ describe("ClawSkillDataOverview dimension columns", () => {
         .getAllByRole("columnheader")
         .map((cell) => cell.textContent);
       expect(detailHeaders).not.toContain("技能总数");
+      const detailPhoneIndex = detailHeaders.indexOf("点击去电访总次数");
+      expect(detailPhoneIndex).toBeGreaterThan(-1);
+      const detailStatHeaders = detailHeaders.slice(detailPhoneIndex + 1);
+      expect(detailStatHeaders).toHaveLength(106);
+      expect(detailStatHeaders).toEqual(statMetricTitles);
       expect(detailHeaders).not.toContain("有权限客户经理人数");
       expect(detailHeaders).toContain(
         group === "manager" ? "当前活跃任务数" : "活跃客户经理人数",
@@ -158,7 +269,46 @@ describe("ClawSkillDataOverview dimension columns", () => {
       }
       expect(await detail.findByText("客户经营方案生成")).toBeInTheDocument();
     },
+    30000,
   );
+});
+
+describe("ClawSkillDataOverview new stat metrics", () => {
+  it("renders integer, rate, null, and undefined stat values", async () => {
+    vi.mocked(request).mockImplementation(async (url) => {
+      const query = new URL(String(url), "http://localhost");
+      if (query.pathname.endsWith("/dates")) return emptyDates;
+      if (query.pathname.endsWith("/options")) return { items: [] };
+      const report = buildTaskReportDemo({
+        start_date: "2026-09-01",
+        end_date: "2026-09-14",
+        first_bbk_id: "110",
+        group_by: "branch",
+        task_type: "push_plan",
+      });
+      const row: ReportRow = {
+        ...report.items[0],
+        vld_ctc_cust_qty: 1234,
+        vld_ctc_cust_rate: 12.34,
+        wlth_prod_buy_cm_qty_t1: null,
+        insu_inc_t14: undefined,
+      };
+      return {
+        ...report,
+        items: [row],
+        total: 1,
+        has_more: false,
+      };
+    });
+
+    await renderPage();
+
+    const summary = within(screen.getByRole("region", { name: "统计报表" }));
+    expect(tableRow(summary, "强接触客户数")).toBe("1,234");
+    expect(tableRow(summary, "强接触客户率")).toBe("12.34%");
+    expect(tableRow(summary, "财富产品购买客户经理人数(T+1)")).toBe("—");
+    expect(tableRow(summary, "保险中收(T+14)")).toBe("—");
+  }, 30000);
 });
 
 describe("ClawSkillDataOverview table chrome", () => {
