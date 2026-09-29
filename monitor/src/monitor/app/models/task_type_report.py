@@ -145,8 +145,8 @@ class TaskTypeReportRow(BaseModel):
     active_manager_count: Count | None
     active_task_count: Count | None = None
     paused_task_count: Count | None = None
-    suc_execute_job: Count
-    read_tasks: Count
+    suc_execute_job: Count | None
+    read_tasks: Count | None
     read_rate: Percentage | None
     recommended_customers: Count | None
     read_customer_count: Count | None
@@ -160,50 +160,50 @@ class TaskTypeReportRow(BaseModel):
     vld_ctc_cust_qty: Count | None = None
     vld_ctc_cust_rate: Percentage | None = None
     # T+1
-    wlth_prod_buy_cm_qty_t1: Count | None = None
-    wlth_prod_buy_cust_qty_t1: Count | None = None
+    wlth_prod_buy_cm_qty_t1: int | None = None
+    wlth_prod_buy_cust_qty_t1: int | None = None
     wlth_prod_buy_amt_t1: float | None = None
     aum_asc_amt_t1: float | None = None
-    sfl_cust_asc_qty_t1: Count | None = None
+    sfl_cust_asc_qty_t1: int | None = None
     wlth_inc_t1: float | None = None
-    fnd_prod_buy_cm_qty_t1: Count | None = None
-    fnd_prod_buy_cust_qty_t1: Count | None = None
+    fnd_prod_buy_cm_qty_t1: int | None = None
+    fnd_prod_buy_cust_qty_t1: int | None = None
     fnd_prod_buy_amt_t1: float | None = None
     fnd_aum_asc_amt_t1: float | None = None
     fnd_inc_t1: float | None = None
     # T+3
-    wlth_prod_buy_cm_qty_t3: Count | None = None
-    wlth_prod_buy_cust_qty_t3: Count | None = None
+    wlth_prod_buy_cm_qty_t3: int | None = None
+    wlth_prod_buy_cust_qty_t3: int | None = None
     wlth_prod_buy_amt_t3: float | None = None
     aum_asc_amt_t3: float | None = None
-    sfl_cust_asc_qty_t3: Count | None = None
+    sfl_cust_asc_qty_t3: int | None = None
     wlth_inc_t3: float | None = None
-    fnd_prod_buy_cm_qty_t3: Count | None = None
-    fnd_prod_buy_cust_qty_t3: Count | None = None
+    fnd_prod_buy_cm_qty_t3: int | None = None
+    fnd_prod_buy_cust_qty_t3: int | None = None
     fnd_prod_buy_amt_t3: float | None = None
     fnd_aum_asc_amt_t3: float | None = None
     fnd_inc_t3: float | None = None
     # T+7
-    wlth_prod_buy_cm_qty_t7: Count | None = None
-    wlth_prod_buy_cust_qty_t7: Count | None = None
+    wlth_prod_buy_cm_qty_t7: int | None = None
+    wlth_prod_buy_cust_qty_t7: int | None = None
     wlth_prod_buy_amt_t7: float | None = None
     aum_asc_amt_t7: float | None = None
-    sfl_cust_asc_qty_t7: Count | None = None
+    sfl_cust_asc_qty_t7: int | None = None
     wlth_inc_t7: float | None = None
-    fnd_prod_buy_cm_qty_t7: Count | None = None
-    fnd_prod_buy_cust_qty_t7: Count | None = None
+    fnd_prod_buy_cm_qty_t7: int | None = None
+    fnd_prod_buy_cust_qty_t7: int | None = None
     fnd_prod_buy_amt_t7: float | None = None
     fnd_aum_asc_amt_t7: float | None = None
     fnd_inc_t7: float | None = None
     # T+14
-    wlth_prod_buy_cm_qty_t14: Count | None = None
-    wlth_prod_buy_cust_qty_t14: Count | None = None
+    wlth_prod_buy_cm_qty_t14: int | None = None
+    wlth_prod_buy_cust_qty_t14: int | None = None
     wlth_prod_buy_amt_t14: float | None = None
     aum_asc_amt_t14: float | None = None
-    sfl_cust_asc_qty_t14: Count | None = None
+    sfl_cust_asc_qty_t14: int | None = None
     wlth_inc_t14: float | None = None
-    fnd_prod_buy_cm_qty_t14: Count | None = None
-    fnd_prod_buy_cust_qty_t14: Count | None = None
+    fnd_prod_buy_cm_qty_t14: int | None = None
+    fnd_prod_buy_cust_qty_t14: int | None = None
     fnd_prod_buy_amt_t14: float | None = None
     fnd_aum_asc_amt_t14: float | None = None
     fnd_inc_t14: float | None = None

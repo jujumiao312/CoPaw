@@ -519,3 +519,11 @@ describe("ClawSkillDataOverview report export filename", () => {
     ).toBe(`Claw-统计报表-${chineseName}-2026-09-01-2026-09-14.xlsx`);
   });
 });
+describe("ClawSkillDataOverview task type filter", () => {
+  it("uses the simplified active question label", async () => {
+    await renderPage();
+
+    expect(screen.getByRole("radio", { name: "主动提问" })).toBeInTheDocument();
+    expect(screen.queryByText("主动提问（名单+方案）")).not.toBeInTheDocument();
+  });
+});

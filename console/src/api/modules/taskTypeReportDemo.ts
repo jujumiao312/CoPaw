@@ -23,11 +23,7 @@ const skills = [
   ["demo-opportunity", "潜力客户机会识别"],
 ] as const;
 const taskTypes: TaskType[] = ["push_plan", "ask_plan", "push_other"];
-const taskNames = [
-  "推送（名单+方案）",
-  "主动提问（名单+方案）",
-  "推送（非名单方案）",
-];
+const taskNames = ["推送（名单+方案）", "主动提问", "推送（非名单方案）"];
 
 /** Deterministic, synthetic presentation data; no backend or database writes. */
 export function buildTaskReportDemo(params: ReportParams): ReportResponse {

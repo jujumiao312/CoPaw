@@ -123,7 +123,7 @@ FILTER_LABELS = {
 }
 TASK_TYPE_LABELS = {
     "push_plan": "推送(名单+方案)",
-    "ask_plan": "主动提问(名单+方案)",
+    "ask_plan": "主动提问",
     "push_other": "推送(非名单方案)",
 }
 OPTION_COLUMNS = {
