@@ -64,6 +64,7 @@ def snapshot_filters(
     task_type: ReportTaskType | None = Query(default=None),
     user_id: str | None = Query(default=None, min_length=1, max_length=64),
     keyword: str | None = Query(default=None, max_length=100),
+    skill_name: str | None = Query(default=None, max_length=256),
     page: int | None = Query(default=None, ge=1),
     page_size: int | None = Query(default=None, ge=1, le=100),
 ) -> dict:
@@ -71,6 +72,7 @@ def snapshot_filters(
         task_type=task_type,
         user_id=user_id,
         keyword=keyword,
+        skill_name=skill_name,
         page=page,
         page_size=page_size,
     )
@@ -172,7 +174,7 @@ async def task_type_snapshot_export(
 
 def options_params(
     end_date: str = Query(description="跑数日期 YYYY-MM-DD"),
-    kind: str = Query(description="branches 或 orgs"),
+    kind: str = Query(description="branches、orgs 或 skills"),
     first_bbk_id: str | None = Query(default=None, max_length=64),
 ) -> ReportOptionsParams:
     try:

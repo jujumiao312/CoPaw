@@ -1107,3 +1107,330 @@ async def test_org_permission_count_is_scoped_to_branch_and_org(env):
         (row.first_bbk_id, row.org_id, row.permission_manager_count)
         for row in org.items
     } == {("001", "01", 1), ("002", "01", 1)}
+
+
+@pytest.mark.asyncio
+async def test_skill_dimension_uses_manager_skill_rows(env):
+    """技能维度直接读 manager_skill，行按 客户经理 × 技能 展开。"""
+    env.raw.execute(
+        "UPDATE swe_rm_claw_list_ind_stat SET active_job_cnt = 7, "
+        "paused_job_cnt = 2 WHERE rpt_combo = 'manager_skill'"
+    )
+    report = await service().get_report(
+        params(group_by="skill", task_type="push_plan"), "S", "100"
+    )
+    assert report.rpt_combo == "manager_skill"
+    assert report.group_by == "skill"
+    assert report.skill_detail is False
+    assert report.total == 2
+    assert "skill_rows_not_additive" in report.warnings
+    assert "snapshot_month_to_date" in report.warnings
+    row = report.items[0]
+    assert (row.first_bbk_id, row.org_id, row.user_id) == (
+        "001",
+        "01",
+        "alice",
+    )
+    assert row.sapid == "alice"
+    assert row.cn_name == "技能一"
+    assert row.skill_id == "k1"
+    assert row.skill_count is None
+    assert row.permission_manager_count is None
+    assert row.active_manager_count is None
+    assert (row.active_task_count, row.paused_task_count) == (7, 2)
+
+
+@pytest.mark.asyncio
+async def test_skill_dimension_excludes_zero_skill_count_rows(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "manager_skill",
+                {**dims, "skill_id": skill},
+                "push_plan",
+                skill_cnt=count,
+            )
+            for skill, count in (("a", 0), ("b", None), ("c", 2))
+        ],
+    )
+    report = await service().get_report(
+        params(group_by="skill", task_type="push_plan"), "S", "100"
+    )
+    assert report.total == 1
+    assert [row.skill_id for row in report.items] == ["c"]
+
+
+@pytest.mark.asyncio
+async def test_skill_name_filters_exact_skill_rows(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "manager_skill",
+                {**dims, "skill_id": skill},
+                "push_plan",
+                skill_cnt=1,
+                cn_name=name,
+            )
+            for skill, name in (
+                ("a", "客户经营方案生成"),
+                ("b", "活动策划"),
+                ("c", "客户经营方案生成"),
+            )
+        ],
+    )
+    report = await service().get_report(
+        params(
+            group_by="skill",
+            task_type="push_plan",
+            skill_name="客户经营方案生成",
+        ),
+        "S",
+        "100",
+    )
+    assert report.total == 2
+    assert {row.cn_name for row in report.items} == {"客户经营方案生成"}
+    assert {row.skill_id for row in report.items} == {"a", "c"}
+    # 技能名称只对技能维度生效，其它维度传该参数返回 422。
+    other = await request(
+        query={
+            "end_date": DATE,
+            "group_by": "manager",
+            "skill_name": "客户经营方案生成",
+        }
+    )
+    assert other.status_code == 422
+    assert other.json()["detail"]["code"] == "report_validation_error"
+
+
+@pytest.mark.asyncio
+async def test_skill_dimension_filter_scope_and_paging(env):
+    """技能维度允许分行/网点筛选，不允许客户经理筛选，分页须指定 task_type。"""
+    scoped = await service().get_report(
+        params(group_by="skill", first_bbk_id="001", org_id="01"), "S", "100"
+    )
+    assert {row.first_bbk_id for row in scoped.items} == {"001"}
+    assert {row.org_id for row in scoped.items} == {"01"}
+    with pytest.raises(cron_report.ReportError) as excinfo:
+        await service().get_report(
+            params(group_by="skill", user_id="alice"), "S", "100"
+        )
+    assert excinfo.value.code == "report_filter_not_supported"
+    assert excinfo.value.status_code == 422
+    first_page = await service().get_report(
+        params(
+            group_by="skill",
+            task_type="push_plan",
+            page=1,
+            page_size=1,
+        ),
+        "S",
+        "100",
+    )
+    assert first_page.total == 2 and first_page.has_more is True
+    assert [row.user_id for row in first_page.items] == ["alice"]
+    second_page = await service().get_report(
+        params(
+            group_by="skill",
+            task_type="push_plan",
+            page=2,
+            page_size=1,
+        ),
+        "S",
+        "100",
+    )
+    assert second_page.has_more is False
+    assert [row.user_id for row in second_page.items] == ["bob"]
+
+
+@pytest.mark.asyncio
+async def test_skill_dimension_http_contract(env):
+    response = await request(
+        query={
+            "end_date": DATE,
+            "group_by": "skill",
+            "task_type": "push_plan",
+            "page": 1,
+            "page_size": 20,
+        }
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["group_by"] == "skill"
+    assert body["rpt_combo"] == "manager_skill"
+    assert body["skill_detail"] is False
+    assert body["total"] == 2
+    assert body["has_more"] is False
+    assert body["items"][0]["cn_name"] == "技能一"
+    without_task_type = await request(
+        query={
+            "end_date": DATE,
+            "group_by": "skill",
+            "page": 1,
+            "page_size": 20,
+        }
+    )
+    assert without_task_type.status_code == 422
+    with_detail = await request(
+        query={"end_date": DATE, "group_by": "skill", "skill_detail": True}
+    )
+    assert with_detail.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_skill_options_dedupe_sort_and_branch_scope(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "manager_skill",
+                {
+                    "first_bbk_id": "001",
+                    "org_id": "01",
+                    "user_id": "alice",
+                    "skill_id": "a",
+                },
+                "push_plan",
+                skill_cnt=1,
+                cn_name="alpha",
+            ),
+            snapshot_row(
+                "manager_skill",
+                {
+                    "first_bbk_id": "001",
+                    "org_id": "01",
+                    "user_id": "bob",
+                    "skill_id": "b",
+                },
+                "push_plan",
+                skill_cnt=1,
+                cn_name="alpha",
+            ),
+            snapshot_row(
+                "manager_skill",
+                {
+                    "first_bbk_id": "001",
+                    "org_id": "01",
+                    "user_id": "alice",
+                    "skill_id": "c",
+                },
+                "push_plan",
+                skill_cnt=1,
+                cn_name="",
+            ),
+            snapshot_row(
+                "manager_skill",
+                {
+                    "first_bbk_id": "001",
+                    "org_id": "01",
+                    "user_id": "alice",
+                    "skill_id": "d",
+                },
+                "push_plan",
+                skill_cnt=1,
+                cn_name=None,
+            ),
+            snapshot_row(
+                "manager_skill",
+                {
+                    "first_bbk_id": "001",
+                    "org_id": "01",
+                    "user_id": "alice",
+                    "skill_id": "e",
+                },
+                "push_plan",
+                skill_cnt=0,
+                cn_name="zero",
+            ),
+            snapshot_row(
+                "manager_skill",
+                {
+                    "first_bbk_id": "002",
+                    "org_id": "01",
+                    "user_id": "bob",
+                    "skill_id": "f",
+                },
+                "push_plan",
+                skill_cnt=1,
+                cn_name="beta",
+            ),
+            snapshot_row(
+                "manager_skill",
+                {
+                    "first_bbk_id": "002",
+                    "org_id": "01",
+                    "user_id": "bob",
+                    "skill_id": "g",
+                },
+                "push_plan",
+                skill_cnt=1,
+                cn_name="gamma",
+            ),
+        ],
+    )
+    all_skills = await service().get_options(options("skills"), "S", "100")
+    assert all_skills.sync_date == DATE
+    assert [item.value for item in all_skills.items] == [
+        "alpha",
+        "beta",
+        "gamma",
+    ]
+    assert [item.value for item in all_skills.items] == [
+        item.label for item in all_skills.items
+    ]
+    scoped = await service().get_options(options("skills", "001"), "S", "100")
+    assert [item.value for item in scoped.items] == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_skill_options_empty_without_snapshot(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    response = await request(
+        path=f"{BASE_URL}/options",
+        query={"end_date": DATE, "kind": "skills"},
+    )
+    assert response.status_code == 200
+    assert response.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_skill_dimension_export_columns(env):
+    response = await request(
+        path=f"{BASE_URL}/export",
+        query={
+            "end_date": DATE,
+            "group_by": "skill",
+            "task_type": "push_plan",
+        },
+    )
+    assert response.status_code == 200
+    sheet = load_workbook(BytesIO(response.content)).active
+    headers = [cell.value for cell in sheet[1]]
+    assert headers[0] == "技能名称"
+    assert headers[1:5] == ["分行号", "分行名称", "网点号", "网点名称"]
+    assert "技能数" not in headers
+    assert "有权限客户经理数" not in headers
+    assert "活跃客户经理数" not in headers
+    task_column = headers.index("任务类型")
+    assert headers[task_column + 1 : task_column + 3] == [
+        "当前活跃任务数",
+        "当前暂停任务数",
+    ]
+    assert sheet.max_row == 3
+    assert sheet["A2"].value == "技能一"
+    with_detail = await request(
+        path=f"{BASE_URL}/export",
+        query={
+            "end_date": DATE,
+            "group_by": "skill",
+            "skill_detail": True,
+            "task_type": "push_plan",
+        },
+    )
+    assert with_detail.status_code == 422

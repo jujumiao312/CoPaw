@@ -4,6 +4,7 @@ const groupNames: Record<ReportParams["group_by"], string> = {
   branch: "分行",
   org: "支行",
   manager: "客户经理",
+  skill: "技能",
 };
 
 export const reportExportFilename = (params: ReportParams) =>

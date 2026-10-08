@@ -716,3 +716,17 @@ async def test_page_total_and_keys_run_concurrently(paged_db, monkeypatch):
     assert result.total > 20 and len(result.items) == 20
     assert result.has_more is True
     assert paged.key_peak == 2
+
+
+@pytest.mark.asyncio
+async def test_online_report_rejects_skill_dimension(dimension_db, service_db):
+    """技能维度与技能选项只在落盘接口提供，在线接口保持 422。"""
+    report = await fetch({**DATES, "group_by": "skill"})
+    assert report.status_code == 422
+    assert report.json()["detail"]["code"] == "report_dimension_not_supported"
+    options = await fetch(
+        {**DATES, "kind": "skills"}, "100", suffix="/options"
+    )
+    assert options.status_code == 422
+    assert options.json()["detail"]["code"] == "report_dimension_not_supported"
+    assert service_db.calls == []

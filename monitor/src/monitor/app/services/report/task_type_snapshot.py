@@ -82,6 +82,7 @@ COMBO_MAP = {
     ("branch", False): "branch",
     ("org", False): "org",
     ("manager", False): "manager",
+    ("skill", False): "manager_skill",
     ("branch", True): "branch_skill",
     ("org", True): "org_skill",
     ("manager", True): "manager_skill",
@@ -109,11 +110,12 @@ COMBO_DIM_COLUMNS = {
         "user_id",
         "skill_id",
     ),
+    "skill": ("first_bbk_id", "org_id", "user_id", "skill_id"),
 }
 # 机构/人员筛选必须落在包含该维度的组合上，否则落盘表无法还原该口径。
 FILTER_REQUIRED_GROUPS = {
-    "first_bbk_id": ("branch", "org", "manager"),
-    "org_id": ("org", "manager"),
+    "first_bbk_id": ("branch", "org", "manager", "skill"),
+    "org_id": ("org", "manager", "skill"),
     "user_id": ("manager",),
 }
 FILTER_LABELS = {
@@ -355,7 +357,12 @@ def build_filters(
         "rpt_combo = %s",
     ]
     values: list = [params.end_date.isoformat(), source_id, combo]
-    if params.skill_detail or params.group_by in ("branch", "org", "manager"):
+    if params.skill_detail or params.group_by in (
+        "branch",
+        "org",
+        "manager",
+        "skill",
+    ):
         clauses.append("skill_cnt > 0")
     if params.task_type:
         clauses.append(f"{_physical_column('task_type')} = %s")
@@ -369,6 +376,9 @@ def build_filters(
     if params.user_id:
         clauses.append(f"{_physical_column('user_id')} = %s")
         values.append(params.user_id)
+    if params.skill_name:
+        clauses.append(f"{_physical_column('cn_name')} = %s")
+        values.append(params.skill_name)
     if params.keyword:
         pattern = _keyword_pattern(params.keyword)
         clauses.append(
@@ -489,6 +499,45 @@ async def _fetch_permission_counts(
     return counts
 
 
+async def _fetch_skill_options(
+    db, params: ReportOptionsParams, source_id: str
+) -> ReportOptionsResponse:
+    """技能选项取该跑数日期 manager_skill 组合里去重后的技能名称。"""
+    skill_column = _physical_column("cn_name")
+    clauses = [
+        f"{_physical_column('prt_dt')} = %s",
+        "source_id = %s",
+        "rpt_combo = %s",
+        "skill_cnt <> 0",
+        f"{skill_column} IS NOT NULL",
+        f"TRIM({skill_column}) <> ''",
+    ]
+    values: list = [
+        params.end_date.isoformat(),
+        source_id,
+        COMBO_MAP[("skill", False)],
+    ]
+    if params.first_bbk_id:
+        clauses.append(f"{_physical_column('first_bbk_id')} = %s")
+        values.append(params.first_bbk_id)
+    rows = await db.fetch_all(
+        f"SELECT DISTINCT {skill_column} AS value "
+        f"FROM {SNAPSHOT_TABLE} WHERE {' AND '.join(clauses)} "
+        "ORDER BY value",
+        tuple(values),
+    )
+    return ReportOptionsResponse(
+        sync_date=params.end_date.isoformat(),
+        items=[
+            ReportOption(
+                value=str(row.get("value") or ""),
+                label=str(row.get("value") or ""),
+            )
+            for row in rows
+        ],
+    )
+
+
 def _row_dimensions(record: dict, dims: tuple[str, ...]) -> dict:
     """还原组合内的维度字段，不适用维度置 null。"""
     has_bbk = "first_bbk_id" in dims
@@ -561,6 +610,11 @@ def _to_row(
     )
 
 
+def _skill_rows(params: SnapshotReportParams) -> bool:
+    """技能明细与技能维度都以技能为行，技能行不可直接相加。"""
+    return params.skill_detail or params.group_by == "skill"
+
+
 def build_warnings(
     params: SnapshotReportParams,
     matched: bool,
@@ -569,14 +623,14 @@ def build_warnings(
 ) -> list[str]:
     """固定顺序：期间口径、快照口径、技能明细、无匹配、截断。"""
     warnings = [PERIOD_RATIOS, SNAPSHOT_WINDOW]
-    if params.skill_detail:
+    if _skill_rows(params):
         warnings.append(SKILL_ROWS_NOT_ADDITIVE)
     if not matched:
         warnings.append(NO_MATCHING_ORGANIZATION)
     elif total == 0:
         warnings.append(
             NO_MATCHING_SKILLS
-            if params.skill_detail
+            if _skill_rows(params)
             else NO_MATCHING_ORGANIZATION
         )
     if truncated:
@@ -662,7 +716,10 @@ class TaskTypeSnapshotService:
         filters = dict(filters)
         filters["user_id"] = params.user_id
         permission_counts = {}
-        if not params.skill_detail and params.group_by != "manager":
+        if not params.skill_detail and params.group_by not in (
+            "manager",
+            "skill",
+        ):
             permission_counts = await _fetch_permission_counts(
                 db, batch, source_id, combo, filters
             )
@@ -764,6 +821,8 @@ class TaskTypeSnapshotService:
                 422, "report_branch_required", "查询支行选项必须指定分行。"
             )
         db = report_db()
+        if params.kind == "skills":
+            return await _fetch_skill_options(db, params, source_id)
         roster = await db.fetch_one(
             "SELECT COALESCE(MAX(CASE WHEN sync_date = %s "
             "THEN sync_date END), MAX(sync_date)) AS sync_date "

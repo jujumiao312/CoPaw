@@ -51,6 +51,9 @@ DATABASE_UNAVAILABLE_MESSAGE = "报表数据库暂不可用。"
 ROSTER_AMBIGUOUS_CODE = "jkh_roster_ambiguous"
 ROSTER_AMBIGUOUS_MESSAGE = "名单快照中存在同一用户的多个机构归属。"
 SCOPE_FORBIDDEN_CODE = "report_scope_forbidden"
+# 技能维度与技能选项只在落盘快照接口提供，在线接口保持 422 语义。
+DIMENSION_UNSUPPORTED_CODE = "report_dimension_not_supported"
+DIMENSION_UNSUPPORTED_MESSAGE = "在线接口不支持技能维度，请使用落盘快照接口。"
 # 互不依赖的事实查询并发上限；设为 1 即退回全部串行。
 REPORT_QUERY_CONCURRENCY = 4
 # 技能来源日志每条查询最多打印的技能 ID 数。
@@ -607,6 +610,12 @@ class TaskTypeReportService:
         self, params: TaskTypeReportParams, source_id: str, bbk_id: str
     ) -> TaskTypeReportResponse:
         """统计主流程：可信范围 → 名单快照 → 名称解析 → 聚合 → 组装。"""
+        if params.group_by == "skill":
+            raise ReportError(
+                422,
+                DIMENSION_UNSUPPORTED_CODE,
+                DIMENSION_UNSUPPORTED_MESSAGE,
+            )
         with _report_stage("get_report") as details:
             params = enforce_branch(params, bbk_id)
             db = report_db()
@@ -647,6 +656,12 @@ class TaskTypeReportService:
     ) -> ReportOptionsResponse:
         """分行/支行下拉选项；与统计接口共用快照解析和分行范围规则。"""
         params = enforce_branch(params, bbk_id)
+        if params.kind not in OPTION_COLUMNS:
+            raise ReportError(
+                422,
+                DIMENSION_UNSUPPORTED_CODE,
+                "在线接口不支持技能选项，请使用落盘快照接口。",
+            )
         if params.kind == "orgs" and params.first_bbk_id is None:
             raise ReportError(
                 422, "report_branch_required", "查询支行选项必须指定分行。"

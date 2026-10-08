@@ -34,13 +34,14 @@ import {
 import { useIframeStore } from "../../../stores/iframeStore";
 import { isTaskReportDemo } from "../../../api/modules/taskTypeReportDemo";
 import { useReport } from "./useReport";
-import { OrganizationFilters } from "./OrganizationFilters";
+import { OrganizationFilters, SkillFilter } from "./OrganizationFilters";
 import { ReportExport } from "./ReportExport";
 import styles from "./index.module.less";
 const groups: { label: string; value: ReportGroup }[] = [
   { label: "分行维度", value: "branch" },
   { label: "支行维度", value: "org" },
   { label: "客户经理维度", value: "manager" },
+  { label: "技能维度", value: "skill" },
 ];
 const tasks: { label: string; value: TaskType }[] = [
   { label: "推送（名单+方案）", value: "push_plan" },
@@ -92,6 +93,17 @@ const statMetrics = [
   ),
 ] as const;
 const metrics = [...leadingMetrics, ...statMetrics];
+/** 客户经理维度与技能维度都以客户经理为行主体，技能维度再展开到技能。 */
+function managerScoped(group: ReportGroup) {
+  return group === "manager" || group === "skill";
+}
+/** 技能维度的一行就是一个技能，不再需要下钻。 */
+function skillRows(params: ReportParams) {
+  return params.group_by === "skill";
+}
+function skillName(row: ReportRow) {
+  return row.cn_name || row.skill_id || "未知技能";
+}
 const METRIC_COLUMN_MIN_WIDTH = 96;
 const METRIC_COLUMN_MAX_WIDTH = 150;
 /** 指标列按列名长度取宽，短列名不占位，长列名允许表头折行。 */
@@ -102,15 +114,14 @@ function metricColumnWidth(title: string) {
   );
 }
 function metricColumns(params: ReportParams): ColumnsType<ReportRow> {
-  const leadingMetrics =
-    params.group_by === "manager"
-      ? ([
-          ["active_task_count", "当前活跃任务数"],
-          ["paused_task_count", "当前暂停任务数"],
-        ] as const)
-      : params.skill_detail
-      ? metrics.slice(1, 2)
-      : metrics.slice(0, 2);
+  const leadingMetrics = managerScoped(params.group_by)
+    ? ([
+        ["active_task_count", "当前活跃任务数"],
+        ["paused_task_count", "当前暂停任务数"],
+      ] as const)
+    : params.skill_detail
+    ? metrics.slice(1, 2)
+    : metrics.slice(0, 2);
   return [...leadingMetrics, ...metrics.slice(2)].map(([key, title]) => ({
     title,
     dataIndex: key,
@@ -145,10 +156,11 @@ function entityKey(row: ReportRow, group: ReportGroup) {
   return JSON.stringify([
     row.first_bbk_id,
     group === "branch" ? null : row.org_id,
-    group === "manager" ? row.user_id : null,
+    managerScoped(group) ? row.user_id : null,
   ]);
 }
 function entityName(row: ReportRow, group: ReportGroup) {
+  if (group === "skill") return skillName(row);
   if (group === "manager") return `${row.user_name || "未知客户经理"}`;
   if (group === "org") return row.org_name || row.org_id || "未知支行";
   return row.first_bbk_name || row.first_bbk_id || "未知分行";
@@ -343,15 +355,33 @@ function ReportResults({ params }: { params: ReportParams }) {
   const dimensionLabel = groups
     .find((item) => item.value === params.group_by)
     ?.label.replace("维度", "");
+  const skill = skillRows(params);
+  const entityColumn: ColumnsType<ReportRow> = skill
+    ? [
+        {
+          title: "技能名称",
+          width: 200,
+          fixed: "left",
+          ellipsis: true,
+          render: (_, row) => (
+            <Tooltip title={skillName(row)}>
+              <span className={styles.skillName}>{skillName(row)}</span>
+            </Tooltip>
+          ),
+        },
+      ]
+    : [
+        {
+          title: dimensionLabel,
+          width: 160,
+          fixed: "left",
+          ellipsis: true,
+          render: (_, row) => entityName(row, params.group_by),
+        },
+      ];
   const columns: ColumnsType<ReportRow> = [
-    {
-      title: dimensionLabel,
-      width: 160,
-      fixed: "left",
-      ellipsis: true,
-      render: (_, row) => entityName(row, params.group_by),
-    },
-    ...(params.group_by === "manager"
+    ...entityColumn,
+    ...(managerScoped(params.group_by)
       ? [
           {
             title: "所属分行",
@@ -383,34 +413,41 @@ function ReportResults({ params }: { params: ReportParams }) {
           },
         ]
       : []),
-    {
-      title: "技能总数",
-      dataIndex: "skill_count",
-      width: 88,
-      align: "right",
-      render: (value: number, row) => {
-        const unavailable =
-          !row.first_bbk_id ||
-          (params.group_by === "org" && !row.org_id) ||
-          (params.group_by === "manager" && !row.user_id);
-        return (
-          <Button
-            className={styles.countLink}
-            type="link"
-            disabled={unavailable}
-            title={
-              unavailable
-                ? "缺少机构或客户经理标识，无法查询对应明细"
-                : undefined
-            }
-            aria-label={`查看${entityName(row, params.group_by)}的技能明细`}
-            onClick={() => setSelected(row)}
-          >
-            {value.toLocaleString()}
-          </Button>
-        );
-      },
-    },
+    ...(skill
+      ? []
+      : [
+          {
+            title: "技能总数",
+            dataIndex: "skill_count",
+            width: 88,
+            align: "right" as const,
+            render: (value: number, row: ReportRow) => {
+              const unavailable =
+                !row.first_bbk_id ||
+                (params.group_by === "org" && !row.org_id) ||
+                (managerScoped(params.group_by) && !row.user_id);
+              return (
+                <Button
+                  className={styles.countLink}
+                  type="link"
+                  disabled={unavailable}
+                  title={
+                    unavailable
+                      ? "缺少机构或客户经理标识，无法查询对应明细"
+                      : undefined
+                  }
+                  aria-label={`查看${entityName(
+                    row,
+                    params.group_by,
+                  )}的技能明细`}
+                  onClick={() => setSelected(row)}
+                >
+                  {value.toLocaleString()}
+                </Button>
+              );
+            },
+          },
+        ]),
     ...metricColumns(params),
   ];
   return (
@@ -420,7 +457,9 @@ function ReportResults({ params }: { params: ReportParams }) {
           <div>
             <h2>
               技能运行 · {dimensionLabel}统计{" "}
-              <span className={styles.headingHint}>点击技能总数查看明细</span>
+              {!skill && (
+                <span className={styles.headingHint}>点击技能总数查看明细</span>
+              )}
             </h2>
             <p>
               {tasks.find((item) => item.value === params.task_type)?.label} ·{" "}
@@ -472,6 +511,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
   const [task, setTask] = useState<TaskType>("push_plan");
   const [branch, setBranch] = useState<string>(bbk === "100" ? "" : bbk);
   const [org, setOrg] = useState<string>();
+  const [skill, setSkill] = useState<string>();
   const [search, setSearch] = useState("");
   const [keyword, setKeyword] = useState("");
   useEffect(() => {
@@ -495,6 +535,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
     task_type: task,
     first_bbk_id: branch || undefined,
     org_id: group === "branch" ? undefined : org,
+    skill_name: group === "skill" ? skill || undefined : undefined,
     keyword: group === "manager" ? keyword || undefined : undefined,
   };
   return (
@@ -535,6 +576,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
             onChange={(value) => {
               setGroup(value);
               setOrg(undefined);
+              setSkill(undefined);
               setSearch("");
               setKeyword("");
             }}
@@ -556,6 +598,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
                 datePicked.current = true;
                 setDate(value);
                 setOrg(undefined);
+                setSkill(undefined);
               }}
             />
           </div>
@@ -568,9 +611,18 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
             onBranchChange={(value) => {
               setBranch(value || "");
               setOrg(undefined);
+              setSkill(undefined);
             }}
             onOrgChange={setOrg}
           />
+          {group === "skill" && (
+            <SkillFilter
+              endDate={params.end_date}
+              branch={branch || undefined}
+              value={skill}
+              onChange={setSkill}
+            />
+          )}
           {group === "manager" && (
             <div className={`${styles.field} ${styles.managerSearch}`}>
               <label htmlFor="report-manager">客户经理</label>

@@ -42,6 +42,8 @@
    保留这层兜底：上游一旦把 `'ALL'` 写进组合维度，前端就会把 `ALL` 当机构号显示。
 3. **筛选必须落在组合维度上**：`FILTER_REQUIRED_GROUPS` 决定分行/网点/经理筛选的可用组合，
    不匹配直接 422 `report_filter_not_supported`，不能用其它组合的数字冒充。
+   技能维度 `group_by=skill` 复用 `manager_skill` 组合，因此允许分行/网点筛选、不允许客户经理筛选；
+   `skill_name` 只在该维度生效（按 `skill_nm` 精确匹配），其它维度传该参数返回 422。
 4. **不再依赖批次表**：日期和行数按快照表 `dw_dat_dt + source_id` 聚合，无行返回 404。
    响应兼容保留 `batch`，`status=ready` 仅表示有数据，不代表装载完成；`loaded_at=null`。
    主查询名单日期 `sync_date` 使用跑数日期 `end_date`，不做日期回退；options 独立读取名单，当天无名单时取最新有效日期，不要求有报表快照。
@@ -76,6 +78,10 @@
 - 机构名解析、跨分行 403、名称歧义 422 仍查名单表（跑数日期 `end_date`），
   因此接口对名单有实时依赖，这不是漏改；
 - 技能明细各列仍不可相加，汇总取不带 `_skill` 的组合；
+- 技能维度 `group_by=skill` 直接以 `manager_skill` 组合为报表主体，行按 客户经理 × 技能 展开，
+  `cn_name` 即技能名称（前端首列）；`skill_count` / `permission_manager_count` / `active_manager_count`
+  为 null，`active_task_count` / `paused_task_count` 与客户经理维度一致，过滤固定带 `skill_cnt > 0`，
+  `warnings` 追加 `skill_rows_not_additive`；不再通过 `skill_detail` 下钻。
 - 经理汇总/明细的 `active_task_count`、`paused_task_count` 映射现有 `active_job_cnt`、`paused_job_cnt`，保留 NULL；接口与导出均以两项任务数替换人数指标，其他维度任务数返回 null。
 - `skill_detail=true` 在 SQL 中过滤 `skill_cnt > 0`，零值与 NULL 行不返回，分页计数和导出共用该条件；分行/支行/经理汇总也使用该过滤；仅总体汇总保留技能数为 0 的行。技能明细不读取技能数指标，响应 skill_count=null。
 - `overall` 组合不支持任何机构筛选（落盘表没有“某分行的总体”这一行）。
@@ -125,6 +131,7 @@ WHERE dw_dat_dt = '2026-09-17' AND source_id = 'RMASSIST'
 | 新增报表组合 | 数仓脚本第 4~6 段、`COMBO_MAP` / `EXPECTED_COMBOS` / `COMBO_DIM_COLUMNS`、`FILTER_REQUIRED_GROUPS`（如含新维度）、API.md | 组合标签一致、/status 不再报缺失、SQLite 与 ASGI 测试通过 |
 | 新增指标列 | 数仓目标表与跑数脚本、`schema.py` 与现场 DDL、`_to_row` 映射、`TaskTypeReportRow`、导出列 | 服务查询列均存在（`test_selected_columns_exist_in_table_ddl` 兜底）、导出列同步、行模型校验通过 |
 | 调整筛选规则 | `FILTER_REQUIRED_GROUPS`、`build_filters` | 筛选规则与组合维度一致，422 场景补测试 |
+| 新增技能维度 | `COMBO_MAP`（`("skill", False) -> "manager_skill"`）、`FILTER_REQUIRED_GROUPS`、`build_filters`（`skill_name`、`skill_cnt > 0`）、`build_warnings`、`get_options`（`kind=skills`）、导出 `DIMENSION_COLUMNS`、API.md | 返回 `rpt_combo=manager_skill` 且 `skill_cnt>0` 的行、首列技能名；`skill_name` 仅技能维度生效；`kind=skills` 去重排序；`branch/org/manager` 与 `skill_detail` 行为不变 |
 | 修改表结构（加列/改宽/换键） | `schema.py` 的 `CREATE_TASK_TYPE_REPORT_*_TABLE` + 现场 DDL；通知写入方 | 服务查询列全部存在（`test_selected_columns_exist_in_table_ddl` 兜底）、升级语句可在真库执行、写入方同步 |
 | 写入方权限变化（如拿到 DELETE） | 现场写入方约定、本文第 3 节第 10 条 | 可以「删当天分区 + 重新写入」，残留行问题随之消失；接口不用动 |
 | 调整写入天数 | 写入方的日期循环 + `gauss/task_type_report_daily.sql` 第 1.0 段日历 | 两边天数一致；接口按 `dw_dat_dt` 单日取数，不受影响 |
@@ -134,7 +141,7 @@ WHERE dw_dat_dt = '2026-09-17' AND source_id = 'RMASSIST'
 
 ## 7. 验证与限制
 
-- 当前快照测试 47 项通过：不建批次表，覆盖五个接口、日期聚合、月份/来源过滤、options 日期回退、左连接人数统计与空值补 0、物理列映射和 DDL 列校验。
+- 当前快照测试 60 项通过：不建批次表，覆盖五个接口、日期聚合、月份/来源过滤、options 日期回退、左连接人数统计与空值补 0、物理列映射和 DDL 列校验，以及技能维度（`group_by=skill` / `skill_name` / `kind=skills` / 技能导出）。
 - `pytest tests/` 整目录运行会被 `tests/test_async_tasks_query_api.py` 注入的 openpyxl 桩
   模块污染，导致后续模块收集失败（既有问题，与本链路无关）；排查时按文件运行，例如
   `venv/Scripts/python.exe -m pytest tests/test_task_type_report_snapshot.py -q`。

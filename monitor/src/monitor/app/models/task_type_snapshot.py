@@ -43,6 +43,7 @@ class SnapshotReportParams(BaseModel):
     first_bbk_name: OrganizationName | None = None
     org_id: OrganizationId | None = None
     org_name: OrganizationName | None = None
+    skill_name: OrganizationName | None = None
     user_id: OrganizationId | None = None
     keyword: Keyword | None = None
     page: Annotated[int, Field(ge=1)] | None = None
@@ -53,16 +54,18 @@ class SnapshotReportParams(BaseModel):
         """校验区间与组合规则，错误在路由层映射为 422。"""
         if self.end_date == date.max:
             raise ValueError("结束日期须早于 9999-12-31")
-        if self.skill_detail and self.group_by == "overall":
+        if self.skill_detail and self.group_by in ("overall", "skill"):
             raise ValueError("技能明细须选择分行、支行或客户经理维度")
         if self.keyword and self.group_by != "manager":
             raise ValueError("关键字仅用于客户经理维度")
+        if self.skill_name and self.group_by != "skill":
+            raise ValueError("技能名称仅用于技能维度")
         if (self.page is None) != (self.page_size is None):
             raise ValueError("page 与 page_size 必须同时提供")
         if self.page is not None and (
-            self.group_by != "manager" or self.task_type is None
+            self.group_by not in ("manager", "skill") or self.task_type is None
         ):
-            raise ValueError("分页必须使用客户经理维度并指定 task_type")
+            raise ValueError("分页必须使用客户经理或技能维度并指定 task_type")
         if self.start_date is not None and self.start_date != month_first_day(
             self.end_date
         ):

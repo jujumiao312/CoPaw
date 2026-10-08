@@ -8,7 +8,7 @@ import {
   isTaskReportDemo,
 } from "./taskTypeReportDemo";
 
-export type ReportGroup = "branch" | "org" | "manager";
+export type ReportGroup = "branch" | "org" | "manager" | "skill";
 export type TaskType = "push_plan" | "ask_plan" | "push_other";
 export interface ReportParams {
   start_date: string;
@@ -16,6 +16,7 @@ export interface ReportParams {
   group_by: ReportGroup;
   task_type?: TaskType;
   skill_detail?: boolean;
+  skill_name?: string;
   first_bbk_id?: string;
   org_id?: string;
   user_id?: string;
@@ -83,7 +84,7 @@ export interface ReportResponse {
 }
 export interface ReportOptionParams {
   end_date: string;
-  kind: "branches" | "orgs";
+  kind: "branches" | "orgs" | "skills";
   first_bbk_id?: string;
 }
 export interface ReportOptions {

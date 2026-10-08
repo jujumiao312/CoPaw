@@ -25,7 +25,7 @@
 | --- | --- | --- |
 | `GET /task-type` | 主查询（七种组合、三类任务） | `GET /task-type-report` |
 | `GET /task-type/export` | 全量 XLSX 导出 | `GET /task-type-report/export` |
-| `GET /task-type/options` | 分行/支行下拉选项 | `GET /task-type-report/options` |
+| `GET /task-type/options` | 分行/支行/技能下拉选项 | `GET /task-type-report/options` |
 | `GET /task-type/dates` | 可用跑数日期与行数 | 新增 |
 | `GET /task-type/status` | 快照存在性与七组合行数核对 | 新增 |
 
@@ -54,17 +54,25 @@
 | --- | --- |
 | `end_date` | 必填，`YYYY-MM-DD`，= 跑数日期（落盘分区），同时是统计截止日 |
 | `start_date` | 可选，只允许等于 `end_date` 当月 1 号；缺省取当月 1 号。其它区间返回 422 |
-| `group_by` | `overall` / `branch` / `org` / `manager`，默认 `overall` |
-| `skill_detail` | 默认 false；true 时 `group_by` 不能是 `overall`，仅返回 `skill_cnt > 0` 的行（分页总数和导出一致） |
+| `group_by` | `overall` / `branch` / `org` / `manager` / `skill`，默认 `overall` |
+| `skill_detail` | 默认 false；true 时 `group_by` 不能是 `overall` 或 `skill`，仅返回 `skill_cnt > 0` 的行（分页总数和导出一致） |
 | `task_type` | 可选 `push_plan` / `ask_plan` / `push_other` |
 | `first_bbk_id` / `first_bbk_name` | 分行筛选，需要组合含分行维度（见 3.4） |
 | `org_id` / `org_name` | 网点筛选，需要组合含网点维度 |
 | `user_id` | 客户经理筛选，只支持 `group_by=manager` |
+| `skill_name` | 最大 256 字符，仅 `group_by=skill`；按 `skill_nm`（逻辑列 `cn_name`）精确匹配，其它维度传该参数返回 422 |
 | `keyword` | 最大 100 字符，仅 `group_by=manager`；匹配 `user_name` / `user_id` / `pst_lvl` |
-| `page` / `page_size` | 成对出现，仅 `group_by=manager` 且指定 `task_type` 时可用；`page_size` 1..100 |
+| `page` / `page_size` | 成对出现，仅 `group_by=manager` / `skill` 且指定 `task_type` 时可用；`page_size` 1..100 |
 
 组合映射：`(group_by, skill_detail)` → `rpt_combo`，取值 `overall`、`branch`、`org`、
 `manager`、`branch_skill`、`org_skill`、`manager_skill`，与落盘表标签一一对应。
+
+技能维度 `group_by=skill` 不新增落盘组合标签，直接复用 `manager_skill`：
+行仍按 客户经理 × 技能 展开（`first_bbk_id` / `org_id` / `user_id` / `skill_id`），
+`cn_name` 即技能名称，作为前端表格首列；`skill_count` / `permission_manager_count` /
+`active_manager_count` 返回 `null`，`active_task_count` / `paused_task_count` 取
+`active_job_cnt` / `paused_job_cnt`（与客户经理维度一致）；过滤固定带 `skill_cnt > 0`。
+技能维度不使用 `skill_detail`，`skill_name` 只在该维度下生效。
 
 ### 3.2 响应
 
@@ -123,7 +131,7 @@
    两种判据还原成 `null`；机构维度存在但名单里缺机构号时返回空串（与在线接口一致）。
 
 `warnings` 顺序：`period_ratios_not_cohort_conversion` → `snapshot_month_to_date` →
-（技能明细）`skill_rows_not_additive` → （无匹配）`no_matching_organization` /
+（技能明细或技能维度）`skill_rows_not_additive` → （无匹配）`no_matching_organization` /
 `no_matching_skills` → （截断）`report_rows_truncated`。
 
 ### 3.3 分页与截断
@@ -143,6 +151,7 @@
 | `branch` / `branch_skill` | 是 | 否 | 否 |
 | `org` / `org_skill` | 是 | 是 | 否 |
 | `manager` / `manager_skill` | 是 | 是 | 是 |
+| `skill`（复用 `manager_skill`） | 是 | 是 | 否 |
 
 需要“总体只在某分行范围内”的口径时，请用 `branch` 组合按分行筛选，或调用在线接口。
 
@@ -152,22 +161,30 @@
 - 分行、支行和客户经理汇总也在 SQL 层过滤 `skill_cnt > 0`，列表、分页 `total`、全量导出共用条件；总体汇总保持原规则。
 - 客户经理汇总及技能明细不查询权限人数，`permission_manager_count`、`active_manager_count` 返回 `null`。
 - 客户经理新增 `active_task_count` ← `active_job_cnt`、`paused_task_count` ← `paused_job_cnt`；保留源表 `NULL`（主动提问无此指标），其他维度返回 `null`。
+- 技能维度复用 `manager_skill` 组合，行按 客户经理 × 技能 展开：`skill_count`、`permission_manager_count`、`active_manager_count` 返回 `null`，`active_task_count` / `paused_task_count` 与客户经理维度一致；`skill_name` 按物理列 `skill_nm` 精确过滤，`warnings` 追加 `skill_rows_not_additive`。
 - `org_name` 原样使用快照 `org_nm`，不追加分行名称。
 - 技能明细导出删除技能数及权限人数；经理导出在原权限人数、活跃经理人数位置依次放当前活跃任务数、当前暂停任务数。旧在线接口导出保持原契约。
 
 ## 4. 导出 GET /task-type/export
 
 与在线导出相同：必须指定 `task_type`，不能传 `page`/`page_size`，其余筛选参数与主查询一致。
+`group_by=skill` 同样支持导出，首列为技能名称（`cn_name`），随后是分行/网点/客户经理标识列，
+不导出 `技能数`、`有权限客户经理数`、`活跃客户经理数`，任务数两列沿用客户经理维度的位置。
 返回真实 XLSX（工作表名 `统计报表` 或 `技能明细`，列集合按组合与任务类型裁剪），
 超过 `50000` 行返回 413 `report_export_too_large`，`Content-Disposition` 暴露给前端。
 
 ## 5. 选项 GET /task-type/options
 
-参数 `end_date`、`kind=branches|orgs`、可选 `first_bbk_id`（查支行选项时必须指定分行）。
+参数 `end_date`、`kind=branches|orgs|skills`、可选 `first_bbk_id`（查支行选项时必须指定分行）。
 优先使用请求 `end_date` 当天的 `jkh_user_inf`；当天完全没有名单时，使用表中最新有效 `sync_date`（不限制早于请求日期）。响应 `sync_date` 返回实际使用的日期。
 选项不检查报表快照是否存在，因此未出仓日期也可以选择机构；仍保留 `X-Bbk-Id` 分行权限限制。
 如果整张名单表没有有效日期，或允许的分行在所选名单中没有机构，返回空 `items`，不伪造选项。
 此回退仅用于 options；主查询的机构校验和权限人数仍使用 `end_date` 当天名单。
+
+`kind=skills` 与机构选项不同：它直接读报表快照表 `swe_rm_claw_list_ind_stat` 中该跑数日期
+`rpt_combo='manager_skill'`、`skill_cnt <> 0` 且 `skill_nm` 非空的行，按 `skill_nm` 去重排序，
+`items` 为 `{value: skill_nm, label: skill_nm}`；传入 `first_bbk_id` 时按分行收窄。
+响应 `sync_date` 为请求的 `end_date`；当天没有快照行时返回空列表（不返回 404）。
 
 ## 6. 日期 GET /task-type/dates
 
@@ -213,6 +230,8 @@
 3. 响应：行字段不变；如需提示“落盘口径”，读 `consistency` / `warnings` / `batch`。
 4. 机构筛选：按 3.4 的矩阵限制可选范围（例如总体汇总不允许选分行）。
 5. 空态：仅 `report_snapshot_not_found` 显示暂无出仓数据；其它错误显示失败信息，不再提示批次装载中。权限人数仅在总体/分行/支行汇总展示。
+6. 技能维度：统计维度选「技能」时 `group_by=skill`，表格首列为技能名称且不再下钻；技能下拉走
+   `options?kind=skills&first_bbk_id=<当前分行>`，选中后以 `skill_name` 精确过滤（仅该维度有效）。
 
 ## 9. 测试与运行
 

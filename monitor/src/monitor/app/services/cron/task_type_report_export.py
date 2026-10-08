@@ -42,6 +42,18 @@ DIMENSION_COLUMNS = {
         "sapid",
         "pst_lvl",
     ),
+    # 技能维度以技能名称打头，其余标识列与客户经理维度一致。
+    "skill": (
+        "cn_name",
+        "first_bbk_id",
+        "first_bbk_name",
+        "org_id",
+        "org_name",
+        "user_id",
+        "user_name",
+        "sapid",
+        "pst_lvl",
+    ),
 }
 # 技能明细只导出技能名称；技能 ID 由 Console 作为名称附注展示，不单列。
 SKILL_COLUMNS = ("cn_name",)
@@ -104,9 +116,9 @@ def column_labels(
     missing = missing_metrics(task_type)
     metrics = list(METRIC_COLUMNS)
     if snapshot:
-        if skill_detail:
+        if skill_detail or group_by == "skill":
             missing.update(("skill_count", "permission_manager_count"))
-        if group_by == "manager":
+        if group_by in ("manager", "skill"):
             metrics[1:3] = MANAGER_TASK_COLUMNS
     fields.extend(field for field, _ in metrics if field not in missing)
     if snapshot:

@@ -57,6 +57,55 @@ function useOptions(params: ReportOptionParams | null) {
   };
 }
 
+/** 技能下拉：选项取统计日期当天 manager_skill 组合里去重后的技能名称。 */
+export function SkillFilter({
+  endDate,
+  branch,
+  value,
+  onChange,
+}: {
+  endDate: string;
+  branch?: string;
+  value?: string;
+  onChange: (value?: string) => void;
+}) {
+  const skills = useOptions({
+    end_date: endDate,
+    kind: "skills",
+    first_bbk_id: branch,
+  });
+  return (
+    <>
+      <div className={styles.field}>
+        <label htmlFor="report-skill">技能</label>
+        <Select
+          key={`${endDate}-${branch}`}
+          id="report-skill"
+          aria-label="技能"
+          showSearch
+          optionFilterProp="label"
+          value={value}
+          onChange={onChange}
+          options={skills.items}
+          disabled={skills.loading || !!skills.error || !!skills.unavailable}
+          allowClear
+          loading={skills.loading}
+          placeholder="全部技能"
+        />
+      </div>
+      {skills.error && (
+        <Alert
+          className={styles.filterError}
+          type="error"
+          showIcon
+          message={`技能列表加载失败：${skills.error}`}
+          action={<Button onClick={skills.retry}>重试技能列表</Button>}
+        />
+      )}
+    </>
+  );
+}
+
 export function OrganizationFilters({
   endDate,
   bbk,

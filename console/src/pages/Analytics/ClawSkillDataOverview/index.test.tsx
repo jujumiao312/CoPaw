@@ -258,6 +258,104 @@ describe("ClawSkillDataOverview dimension columns", () => {
   );
 });
 
+describe("ClawSkillDataOverview skill dimension", () => {
+  const skillPayload = (url: string) => {
+    const query = new URL(url, "http://localhost");
+    if (query.pathname.endsWith("/dates")) return emptyDates;
+    if (query.pathname.endsWith("/options"))
+      return {
+        items: [{ value: "客户经营方案生成", label: "客户经营方案生成" }],
+      };
+    const report = buildTaskReportDemo({
+      start_date: "2026-09-01",
+      end_date: "2026-09-14",
+      first_bbk_id: "110",
+      group_by: query.searchParams.get("group_by") as ReportGroup,
+      task_type: "push_plan",
+      skill_name: query.searchParams.get("skill_name") || undefined,
+    });
+    return {
+      ...report,
+      items: report.items.slice(0, 1),
+      total: 1,
+      has_more: false,
+    };
+  };
+
+  beforeEach(() => {
+    vi.mocked(request).mockImplementation(async (url) =>
+      skillPayload(String(url)),
+    );
+  });
+
+  it("leads with the skill name, drops the skill total, and pages server-side", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByText("技能维度"));
+
+    const summary = within(
+      await screen.findByRole("region", { name: "统计报表" }),
+    );
+    const headers = () =>
+      summary.getAllByRole("columnheader").map((cell) => cell.textContent);
+    await waitFor(() => expect(headers()).toContain("技能名称"));
+    expect(headers().slice(0, 7)).toEqual([
+      "技能名称",
+      "所属分行",
+      "所属网点",
+      "SAPID",
+      "SAP岗位",
+      "当前活跃任务数",
+      "当前暂停任务数",
+    ]);
+    const phoneIndex = headers().indexOf("点击去电访总次数");
+    expect(phoneIndex).toBeGreaterThan(-1);
+    expect(headers().slice(phoneIndex + 1)).toEqual(statMetricTitles);
+    expect(headers()).not.toContain("技能总数");
+    expect(headers()).not.toContain("有权限客户经理人数");
+    expect(
+      summary.queryByRole("button", { name: /查看.*的技能明细/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "技能明细" })).toBeNull();
+
+    const queries = reportQueries();
+    const query = queries[queries.length - 1];
+    expect(query.searchParams.get("group_by")).toBe("skill");
+    expect(query.searchParams.get("page")).toBe("1");
+    expect(query.searchParams.get("page_size")).toBe("20");
+    expect(query.searchParams.has("skill_detail")).toBe(false);
+  }, 30000);
+
+  it("loads skill options for the report date and filters by the picked skill", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByText("技能维度"));
+
+    const skillSelect = await screen.findByRole("combobox", { name: "技能" });
+    expect(
+      vi.mocked(request).mock.calls.some(([url]) => {
+        const query = new URL(String(url), "http://localhost");
+        return (
+          query.pathname.endsWith("/options") &&
+          query.searchParams.get("kind") === "skills"
+        );
+      }),
+    ).toBe(true);
+
+    fireEvent.mouseDown(skillSelect);
+    fireEvent.click(
+      await screen.findByText("客户经营方案生成", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+
+    await waitFor(() => {
+      const queries = reportQueries();
+      expect(queries[queries.length - 1].searchParams.get("skill_name")).toBe(
+        "客户经营方案生成",
+      );
+    });
+  }, 30000);
+});
+
 describe("ClawSkillDataOverview new stat metrics", () => {
   it("renders integer, rate, null, and undefined stat values", async () => {
     vi.mocked(request).mockImplementation(async (url) => {
@@ -508,6 +606,7 @@ describe("ClawSkillDataOverview report export filename", () => {
     ["branch", "分行"],
     ["org", "支行"],
     ["manager", "客户经理"],
+    ["skill", "技能"],
   ] as const)("uses the Chinese name for %s", (group_by, chineseName) => {
     expect(
       reportExportFilename({

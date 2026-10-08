@@ -42,7 +42,7 @@ export function useReport(params: ReportParams, revision: number) {
     getTaskTypeReport(
       {
         ...filters,
-        ...(filters.group_by === "manager"
+        ...(filters.group_by === "manager" || filters.group_by === "skill"
           ? { page: 1, page_size: REPORT_PAGE_SIZE }
           : {}),
       },
@@ -63,7 +63,8 @@ export function useReport(params: ReportParams, revision: number) {
   }, [query, revision]);
 
   const data = state.data;
-  const serverPaged = params.group_by === "manager";
+  const serverPaged =
+    params.group_by === "manager" || params.group_by === "skill";
   const hasMore =
     !!data && (serverPaged ? data.has_more : visible < data.items.length);
   const loadMore = async () => {

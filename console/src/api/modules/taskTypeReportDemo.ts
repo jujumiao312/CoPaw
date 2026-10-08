@@ -24,11 +24,15 @@ const skills = [
 ] as const;
 const taskTypes: TaskType[] = ["push_plan", "ask_plan", "push_other"];
 const taskNames = ["推送（名单+方案）", "主动提问", "推送（非名单方案）"];
+/** 客户经理维度与技能维度都以客户经理为行主体，技能维度再展开到技能。 */
+const managerScoped = (group: ReportParams["group_by"]) =>
+  group === "manager" || group === "skill";
 
 /** Deterministic, synthetic presentation data; no backend or database writes. */
 export function buildTaskReportDemo(params: ReportParams): ReportResponse {
   const items: ReportRow[] = [];
   const days = dayjs(params.end_date).diff(dayjs(params.start_date), "day") + 1;
+  const skillRowsEnabled = !!params.skill_detail || params.group_by === "skill";
   const branches = BBK_ID_MAP.filter((branch) =>
     params.first_bbk_id
       ? branch.value === params.first_bbk_id
@@ -45,10 +49,9 @@ export function buildTaskReportDemo(params: ReportParams): ReportResponse {
     orgs.forEach((orgName, orgIndex) => {
       const orgId = orgName ? `${branch.value}0${orgIndex + 1}` : null;
       if (params.org_id && orgId !== params.org_id) return;
-      const managers =
-        params.group_by === "manager"
-          ? Array.from({ length: 8 }, (_, index) => `演示经理${index + 1}`)
-          : [null];
+      const managers = managerScoped(params.group_by)
+        ? Array.from({ length: 8 }, (_, index) => `演示经理${index + 1}`)
+        : [null];
       managers.forEach((managerName, managerIndex) => {
         const userId = managerName ? `DEMO-${orgId}-${managerIndex + 1}` : null;
         if (params.user_id && userId !== params.user_id) return;
@@ -59,8 +62,9 @@ export function buildTaskReportDemo(params: ReportParams): ReportResponse {
             .includes(params.keyword.toLowerCase())
         )
           return;
-        const skillRows = params.skill_detail ? [...skills] : [null];
+        const skillRows = skillRowsEnabled ? [...skills] : [null];
         skillRows.forEach((skill, skillIndex) => {
+          if (params.skill_name && skill?.[1] !== params.skill_name) return;
           taskTypes.forEach((task, taskIndex) => {
             if (params.task_type && task !== params.task_type) return;
             const scale =
@@ -128,7 +132,7 @@ export function buildTaskReportDemo(params: ReportParams): ReportResponse {
       });
     });
   });
-  const page = params.group_by === "manager" ? params.page : undefined;
+  const page = managerScoped(params.group_by) ? params.page : undefined;
   const size = params.page_size || 20;
   return {
     sync_date: params.end_date,
@@ -144,16 +148,18 @@ export function buildTaskReportDemo(params: ReportParams): ReportResponse {
 export function buildTaskReportOptionsDemo(
   params: ReportOptionParams,
 ): ReportOptions {
-  const items =
-    params.kind === "branches"
-      ? BBK_ID_MAP.filter((item) =>
-          params.first_bbk_id
-            ? item.value === params.first_bbk_id
-            : item.value !== "100",
-        )
-      : ["营业部", "科技园支行", "中心支行"].map((label, index) => ({
-          value: `${params.first_bbk_id}0${index + 1}`,
-          label,
-        }));
+  const options: Record<ReportOptionParams["kind"], ReportOptions["items"]> = {
+    branches: BBK_ID_MAP.filter((item) =>
+      params.first_bbk_id
+        ? item.value === params.first_bbk_id
+        : item.value !== "100",
+    ),
+    orgs: ["营业部", "科技园支行", "中心支行"].map((label, index) => ({
+      value: `${params.first_bbk_id}0${index + 1}`,
+      label,
+    })),
+    skills: skills.map(([, name]) => ({ value: name, label: name })),
+  };
+  const items = options[params.kind];
   return { sync_date: params.end_date, items };
 }

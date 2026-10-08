@@ -13,7 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-ReportGroupBy = Literal["overall", "branch", "org", "manager"]
+ReportGroupBy = Literal["overall", "branch", "org", "manager", "skill"]
 ReportTaskType = Literal["push_plan", "ask_plan", "push_other"]
 OrganizationId = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
@@ -237,7 +237,7 @@ class TaskTypeReportResponse(BaseModel):
 
 class ReportOptionsParams(BaseModel):
     end_date: ReportDate
-    kind: Literal["branches", "orgs"]
+    kind: Literal["branches", "orgs", "skills"]
     first_bbk_id: OrganizationId | None = None
 
 

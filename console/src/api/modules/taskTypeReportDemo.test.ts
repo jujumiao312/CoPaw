@@ -8,6 +8,7 @@ describe("模拟看板数据", () => {
       "branch",
       "org",
       "manager",
+      "skill",
     ] satisfies ReportGroup[]) {
       const params = {
         start_date: "2026-09-01",
