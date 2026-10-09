@@ -45,8 +45,8 @@ const groups: { label: string; value: ReportGroup }[] = [
 ];
 const tasks: { label: string; value: TaskType }[] = [
   { label: "推送（名单+方案）", value: "push_plan" },
-  { label: "主动提问", value: "ask_plan" },
   { label: "推送（非名单方案）", value: "push_other" },
+  { label: "主动提问", value: "ask_plan" },
 ];
 const leadingMetrics = [
   ["permission_manager_count", "有权限客户经理人数"],
