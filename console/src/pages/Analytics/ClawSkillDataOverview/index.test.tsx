@@ -298,15 +298,16 @@ describe("ClawSkillDataOverview skill dimension", () => {
     const headers = () =>
       summary.getAllByRole("columnheader").map((cell) => cell.textContent);
     await waitFor(() => expect(headers()).toContain("技能名称"));
-    expect(headers().slice(0, 7)).toEqual([
+    expect(headers().slice(0, 6)).toEqual([
       "技能名称",
+      "客户经理",
       "所属分行",
       "所属网点",
       "SAPID",
       "SAP岗位",
-      "当前活跃任务数",
-      "当前暂停任务数",
     ]);
+    expect(headers()).not.toContain("当前活跃任务数");
+    expect(headers()).not.toContain("当前暂停任务数");
     const phoneIndex = headers().indexOf("点击去电访总次数");
     expect(phoneIndex).toBeGreaterThan(-1);
     expect(headers().slice(phoneIndex + 1)).toEqual(statMetricTitles);
@@ -352,6 +353,22 @@ describe("ClawSkillDataOverview skill dimension", () => {
       expect(queries[queries.length - 1].searchParams.get("skill_name")).toBe(
         "客户经营方案生成",
       );
+    });
+  }, 30000);
+
+  it("queries by customer manager with the shared keyword filter", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByText("技能维度"));
+
+    const managerSearch = await screen.findByPlaceholderText("姓名 / SAP号");
+    fireEvent.change(managerSearch, { target: { value: "演示经理3" } });
+    fireEvent.keyDown(managerSearch, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      const queries = reportQueries();
+      const query = queries[queries.length - 1];
+      expect(query.searchParams.get("group_by")).toBe("skill");
+      expect(query.searchParams.get("keyword")).toBe("演示经理3");
     });
   }, 30000);
 });

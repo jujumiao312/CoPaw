@@ -407,6 +407,44 @@ async def test_keyword_matches_name_id_and_level(env):
 
 
 @pytest.mark.asyncio
+async def test_skill_dimension_keyword_filters_manager_columns(env):
+    """技能维度支持客户经理搜索，语义与客户经理维度一致。"""
+    queries: list[str] = []
+    env.raw.set_trace_callback(queries.append)
+    report = await service().get_report(
+        params(
+            group_by="skill",
+            task_type="push_plan",
+            keyword="alice",
+            page=1,
+            page_size=20,
+        ),
+        "S",
+        "100",
+    )
+    assert report.total == 1
+    assert [row.user_id for row in report.items] == ["alice"]
+    select_sql = next(
+        sql for sql in queries if "rpt_combo" in sql and "LIMIT" in sql
+    )
+    assert "rpt_combo = 'manager_skill'" in select_sql
+    assert "skill_cnt > 0" in select_sql
+    assert "cm_nm LIKE '%alice%' ESCAPE '!'" in select_sql
+    assert "cm_id LIKE '%alice%' ESCAPE '!'" in select_sql
+    assert "pst_lvl LIKE '%alice%' ESCAPE '!'" in select_sql
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group_by", ["overall", "branch", "org"])
+async def test_keyword_still_rejected_outside_manager_and_skill(env, group_by):
+    response = await request(
+        query={"end_date": DATE, "group_by": group_by, "keyword": "alice"}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "report_validation_error"
+
+
+@pytest.mark.asyncio
 async def test_filter_scope_must_match_combo(env):
     with pytest.raises(cron_report.ReportError) as excinfo:
         await service().get_report(params(first_bbk_id="001"), "S", "100")

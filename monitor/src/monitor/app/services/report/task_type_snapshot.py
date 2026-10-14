@@ -294,7 +294,10 @@ def _batch_info(batch: dict) -> SnapshotBatchInfo:
 def _legacy_params(
     params: SnapshotReportParams, sync_date: str
 ) -> TaskTypeReportParams:
-    """构造在线参数模型，复用其范围校验与名称解析。"""
+    """构造在线参数模型，复用其范围校验与名称解析。
+
+    `keyword` 不参与名单校验，且在线模型只放行客户经理维度，这里不传递。
+    """
     return TaskTypeReportParams(
         start_date=params.stat_start_date,
         end_date=params.end_date,
@@ -305,7 +308,6 @@ def _legacy_params(
         org_id=params.org_id,
         org_name=params.org_name,
         user_id=params.user_id,
-        keyword=params.keyword,
     )
 
 

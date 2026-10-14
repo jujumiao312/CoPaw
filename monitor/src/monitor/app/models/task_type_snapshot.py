@@ -56,8 +56,8 @@ class SnapshotReportParams(BaseModel):
             raise ValueError("结束日期须早于 9999-12-31")
         if self.skill_detail and self.group_by in ("overall", "skill"):
             raise ValueError("技能明细须选择分行、支行或客户经理维度")
-        if self.keyword and self.group_by != "manager":
-            raise ValueError("关键字仅用于客户经理维度")
+        if self.keyword and self.group_by not in ("manager", "skill"):
+            raise ValueError("关键字仅用于客户经理或技能维度")
         if self.skill_name and self.group_by != "skill":
             raise ValueError("技能名称仅用于技能维度")
         if (self.page is None) != (self.page_size is None):

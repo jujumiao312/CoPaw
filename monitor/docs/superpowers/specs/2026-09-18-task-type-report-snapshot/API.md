@@ -61,7 +61,7 @@
 | `org_id` / `org_name` | 网点筛选，需要组合含网点维度 |
 | `user_id` | 客户经理筛选，只支持 `group_by=manager` |
 | `skill_name` | 最大 256 字符，仅 `group_by=skill`；按 `skill_nm`（逻辑列 `cn_name`）精确匹配，其它维度传该参数返回 422 |
-| `keyword` | 最大 100 字符，仅 `group_by=manager`；匹配 `user_name` / `user_id` / `pst_lvl` |
+| `keyword` | 最大 100 字符，仅 `group_by=manager` / `skill`；匹配 `user_name` / `user_id` / `pst_lvl` |
 | `page` / `page_size` | 成对出现，仅 `group_by=manager` / `skill` 且指定 `task_type` 时可用；`page_size` 1..100 |
 
 组合映射：`(group_by, skill_detail)` → `rpt_combo`，取值 `overall`、`branch`、`org`、
@@ -73,6 +73,8 @@
 `active_manager_count` 返回 `null`，`active_task_count` / `paused_task_count` 取
 `active_job_cnt` / `paused_job_cnt`（与客户经理维度一致）；过滤固定带 `skill_cnt > 0`。
 技能维度不使用 `skill_detail`，`skill_name` 只在该维度下生效。
+`keyword` 在技能维度下同样生效：`manager_skill` 行的客户经理三列都有值，按与客户经理维度
+一致的语义匹配 `cm_nm` / `cm_id` / `pst_lvl`。
 
 ### 3.2 响应
 
@@ -154,6 +156,8 @@
 | `skill`（复用 `manager_skill`） | 是 | 是 | 否 |
 
 需要“总体只在某分行范围内”的口径时，请用 `branch` 组合按分行筛选，或调用在线接口。
+`keyword` 适用于 `manager` 与 `skill` 维度（两者都有客户经理列），其余维度传该参数返回 422；
+技能维度下与客户经理维度同一语义匹配 `cm_nm` / `cm_id` / `pst_lvl`。
 
 ### 指标适用范围（2026-09-22）
 
@@ -161,7 +165,7 @@
 - 分行、支行和客户经理汇总也在 SQL 层过滤 `skill_cnt > 0`，列表、分页 `total`、全量导出共用条件；总体汇总保持原规则。
 - 客户经理汇总及技能明细不查询权限人数，`permission_manager_count`、`active_manager_count` 返回 `null`。
 - 客户经理新增 `active_task_count` ← `active_job_cnt`、`paused_task_count` ← `paused_job_cnt`；保留源表 `NULL`（主动提问无此指标），其他维度返回 `null`。
-- 技能维度复用 `manager_skill` 组合，行按 客户经理 × 技能 展开：`skill_count`、`permission_manager_count`、`active_manager_count` 返回 `null`，`active_task_count` / `paused_task_count` 与客户经理维度一致；`skill_name` 按物理列 `skill_nm` 精确过滤，`warnings` 追加 `skill_rows_not_additive`。
+- 技能维度复用 `manager_skill` 组合，行按 客户经理 × 技能 展开：`skill_count`、`permission_manager_count`、`active_manager_count` 返回 `null`，`active_task_count` / `paused_task_count` 与客户经理维度一致；`skill_name` 按物理列 `skill_nm` 精确过滤，`keyword` 与客户经理维度同语义匹配客户经理三列，`warnings` 追加 `skill_rows_not_additive`。
 - `org_name` 原样使用快照 `org_nm`，不追加分行名称。
 - 技能明细导出删除技能数及权限人数；经理导出在原权限人数、活跃经理人数位置依次放当前活跃任务数、当前暂停任务数。旧在线接口导出保持原契约。
 
@@ -231,7 +235,8 @@
 4. 机构筛选：按 3.4 的矩阵限制可选范围（例如总体汇总不允许选分行）。
 5. 空态：仅 `report_snapshot_not_found` 显示暂无出仓数据；其它错误显示失败信息，不再提示批次装载中。权限人数仅在总体/分行/支行汇总展示。
 6. 技能维度：统计维度选「技能」时 `group_by=skill`，表格首列为技能名称且不再下钻；技能下拉走
-   `options?kind=skills&first_bbk_id=<当前分行>`，选中后以 `skill_name` 精确过滤（仅该维度有效）。
+   `options?kind=skills&first_bbk_id=<当前分行>`，选中后以 `skill_name` 精确过滤（仅该维度有效）；
+   客户经理搜索框以 `keyword` 过滤（`manager` / `skill` 维度通用）。
 
 ## 9. 测试与运行
 

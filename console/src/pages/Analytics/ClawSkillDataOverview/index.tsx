@@ -114,7 +114,9 @@ function metricColumnWidth(title: string) {
   );
 }
 function metricColumns(params: ReportParams): ColumnsType<ReportRow> {
-  const leadingMetrics = managerScoped(params.group_by)
+  const leadingMetrics = skillRows(params)
+    ? ([] as const)
+    : managerScoped(params.group_by)
     ? ([
         ["active_task_count", "当前活跃任务数"],
         ["paused_task_count", "当前暂停任务数"],
@@ -369,6 +371,12 @@ function ReportResults({ params }: { params: ReportParams }) {
             </Tooltip>
           ),
         },
+        {
+          title: "客户经理",
+          width: 120,
+          ellipsis: true,
+          render: (_, row) => `${row.user_name || "未知客户经理"}`,
+        },
       ]
     : [
         {
@@ -536,7 +544,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
     first_bbk_id: branch || undefined,
     org_id: group === "branch" ? undefined : org,
     skill_name: group === "skill" ? skill || undefined : undefined,
-    keyword: group === "manager" ? keyword || undefined : undefined,
+    keyword: managerScoped(group) ? keyword || undefined : undefined,
   };
   return (
     <main className={styles.page}>
@@ -623,7 +631,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
               onChange={setSkill}
             />
           )}
-          {group === "manager" && (
+          {managerScoped(group) && (
             <div className={`${styles.field} ${styles.managerSearch}`}>
               <label htmlFor="report-manager">客户经理</label>
               <Input.Search
