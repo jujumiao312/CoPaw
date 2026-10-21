@@ -447,6 +447,66 @@ describe("ClawSkillDataOverview table chrome", () => {
     expect(await detail.findByText("客户经营方案生成")).toBeInTheDocument();
     expect(detail.queryByText("demo-customer-plan")).not.toBeInTheDocument();
   });
+
+  it("scrolls the skill details into view when the count is clicked", async () => {
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollIntoView",
+    );
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      vi.mocked(request).mockImplementation(async (url) => {
+        const query = new URL(String(url), "http://localhost");
+        if (query.pathname.endsWith("/dates")) return emptyDates;
+        if (query.pathname.endsWith("/options")) return { items: [] };
+        const report = buildTaskReportDemo({
+          start_date: "2026-09-01",
+          end_date: "2026-09-14",
+          first_bbk_id: "110",
+          group_by: "branch",
+          task_type: "push_plan",
+          skill_detail: query.searchParams.get("skill_detail") === "true",
+        });
+        return {
+          ...report,
+          items: report.items.slice(0, 1),
+          total: 1,
+          has_more: false,
+        };
+      });
+
+      await renderPage();
+
+      const summary = within(screen.getByRole("region", { name: "统计报表" }));
+      fireEvent.click(
+        (await summary.findAllByRole("button", { name: /查看.*的技能明细/ }))[0],
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole("region", { name: "技能明细" }),
+        ).toBeInTheDocument(),
+      );
+      expect(scrollIntoView).toHaveBeenCalledWith(
+        expect.objectContaining({ behavior: "smooth", block: "start" }),
+      );
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(
+          HTMLElement.prototype,
+          "scrollIntoView",
+          originalScrollIntoView,
+        );
+      } else {
+        delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+          .scrollIntoView;
+      }
+    }
+  });
 });
 
 describe("ClawSkillDataOverview report date filter", () => {

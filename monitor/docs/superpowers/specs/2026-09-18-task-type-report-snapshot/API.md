@@ -14,7 +14,7 @@
 | 表结构 | `src/monitor/app/database/schema.py`（权威 DDL；现场提供表定义，历史 Gauss/Hive 装载文件仅作参考） |
 | 数据写入 | 由现场作业自行写入，本仓库不提供装载脚本；写入方须按 `schema.py` 的 DDL 与本文第 2/3 节遵守列语义（`'ALL'`、NULL 规则），并保证对外查询时数据完整 |
 | 行覆盖 | 主键 `(dw_dat_dt, source_id, dim_hash)`，同键 upsert 即幂等重写；源侧已消失的维度行若没被清掉会继续出数，属已确认取舍 |
-| 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口以当前 source 的 `swe_tenant_init_source` 为左表，LEFT JOIN 跑数日期 `end_date` 的 `jkh_user_inf`，按匹配到的 `user_id` 去重计算；仅总体/分行/支行汇总查询，技能明细及客户经理维度不查询并返回 null；支行按 first_bbk_id + org_id 统计该支行人数，而非整分行；当天名单或来源授权缺失、人数结果不存在或为 NULL 时相应人数为 0 |
+| 有权限客户经理数 | `permission_manager_count` **不在数据源里**（高斯表与落盘表都不存该列），由接口以「当前 source 下未删除定时任务去重后的租户」为左表（`SELECT DISTINCT tenant_id FROM swe_cron_jobs WHERE status <> 'deleted' AND source_id = 当前 source`），LEFT JOIN 跑数日期 `end_date` 的 `jkh_user_inf`，按匹配到的 `user_id` 去重计算；仅总体/分行/支行汇总查询，技能明细及客户经理维度不查询并返回 null；支行按 first_bbk_id + org_id 统计该支行人数，而非整分行；当天名单或来源授权缺失、人数结果不存在或为 NULL 时相应人数为 0 |
 | 在线接口 | `/api/monitor/cron/task-type-report`、`/export`、`/options` 保持不变，仍按明细实时统计 |
 | 代码 | `routers/task_type_snapshot.py`、`services/report/task_type_snapshot.py`、`models/task_type_snapshot.py` |
 | 历史链路 | Hive 版（`hive/task_type_report_tdsql.sql`）保留作参考，其建表语句已过时，以 `schema.py` 为准 |
@@ -55,7 +55,7 @@
 | `end_date` | 必填，`YYYY-MM-DD`，= 跑数日期（落盘分区），同时是统计截止日 |
 | `start_date` | 可选，只允许等于 `end_date` 当月 1 号；缺省取当月 1 号。其它区间返回 422 |
 | `group_by` | `overall` / `branch` / `org` / `manager` / `skill`，默认 `overall` |
-| `skill_detail` | 默认 false；true 时 `group_by` 不能是 `overall` 或 `skill`，仅返回 `skill_cnt > 0` 的行（分页总数和导出一致） |
+| `skill_detail` | 默认 false；true 时 `group_by` 不能是 `overall` 或 `skill`；2026-10-21 起不再过滤 `skill_cnt`，技能总数为 0 的行也会返回（分页总数和导出一致） |
 | `task_type` | 可选 `push_plan` / `ask_plan` / `push_other` |
 | `first_bbk_id` / `first_bbk_name` | 分行筛选，需要组合含分行维度（见 3.4） |
 | `org_id` / `org_name` | 网点筛选，需要组合含网点维度 |
@@ -71,7 +71,7 @@
 行仍按 客户经理 × 技能 展开（`first_bbk_id` / `org_id` / `user_id` / `skill_id`），
 `cn_name` 即技能名称，作为前端表格首列；`skill_count` / `permission_manager_count` /
 `active_manager_count` 返回 `null`，`active_task_count` / `paused_task_count` 取
-`active_job_cnt` / `paused_job_cnt`（与客户经理维度一致）；过滤固定带 `skill_cnt > 0`。
+`active_job_cnt` / `paused_job_cnt`（与客户经理维度一致）。
 技能维度不使用 `skill_detail`，`skill_name` 只在该维度下生效。
 `keyword` 在技能维度下同样生效：`manager_skill` 行的客户经理三列都有值，按与客户经理维度
 一致的语义匹配 `cm_nm` / `cm_id` / `pst_lvl`。
@@ -161,8 +161,8 @@
 
 ### 指标适用范围（2026-09-22）
 
-- 技能明细不读取 `skill_cnt` 指标，`skill_count`、`permission_manager_count` 返回 `null`；仍使用 `skill_cnt > 0` 作为行有效性筛选。
-- 分行、支行和客户经理汇总也在 SQL 层过滤 `skill_cnt > 0`，列表、分页 `total`、全量导出共用条件；总体汇总保持原规则。
+- 技能明细不读取 `skill_cnt` 指标，`skill_count`、`permission_manager_count` 返回 `null`。
+- 分行、支行和客户经理汇总自 2026-10-21 起不再过滤 `skill_cnt`（技能总数为 0 的行也返回），列表、分页 `total`、全量导出共用条件。
 - 客户经理汇总及技能明细不查询权限人数，`permission_manager_count`、`active_manager_count` 返回 `null`。
 - 客户经理新增 `active_task_count` ← `active_job_cnt`、`paused_task_count` ← `paused_job_cnt`；保留源表 `NULL`（主动提问无此指标），其他维度返回 `null`。
 - 技能维度复用 `manager_skill` 组合，行按 客户经理 × 技能 展开：`skill_count`、`permission_manager_count`、`active_manager_count` 返回 `null`，`active_task_count` / `paused_task_count` 与客户经理维度一致；`skill_name` 按物理列 `skill_nm` 精确过滤，`keyword` 与客户经理维度同语义匹配客户经理三列，`warnings` 追加 `skill_rows_not_additive`。

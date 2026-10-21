@@ -354,6 +354,15 @@ function SkillDetails({
 function ReportResults({ params }: { params: ReportParams }) {
   const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState<ReportRow>();
+  const detailRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (selected) {
+      detailRef.current?.scrollIntoView?.({
+        behavior: "smooth",
+        block: "start",
+      });
+    }
+  }, [selected]);
   const dimensionLabel = groups
     .find((item) => item.value === params.group_by)
     ?.label.replace("维度", "");
@@ -499,12 +508,14 @@ function ReportResults({ params }: { params: ReportParams }) {
         </p>
       </section>
       {selected && (
-        <SkillDetails
-          key={entityKey(selected, params.group_by)}
-          row={selected}
-          params={params}
-          onClose={() => setSelected(undefined)}
-        />
+        <div ref={detailRef}>
+          <SkillDetails
+            key={entityKey(selected, params.group_by)}
+            row={selected}
+            params={params}
+            onClose={() => setSelected(undefined)}
+          />
+        </div>
       )}
     </>
   );

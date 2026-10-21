@@ -383,8 +383,10 @@ def build_queries(
         MIN(r.org_nm) AS org_name {manager_info},
         COUNT(DISTINCT i.tenant_id) AS permission_manager_count
         FROM jkh_user_inf r
-        LEFT JOIN swe_tenant_init_source i
-            ON i.tenant_id = r.user_id AND i.source_id = :source_id
+        LEFT JOIN (
+            SELECT DISTINCT tenant_id FROM swe_cron_jobs
+            WHERE status <> 'deleted' AND source_id = :source_id
+        ) i ON i.tenant_id = r.user_id
         WHERE r.sync_date = :sync_date AND r.user_id IS NOT NULL AND r.user_id <> ''
             {roster_filter} {permission_filter}
         GROUP BY {groups}"""

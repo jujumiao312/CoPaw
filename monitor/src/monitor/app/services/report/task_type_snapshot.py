@@ -359,13 +359,6 @@ def build_filters(
         "rpt_combo = %s",
     ]
     values: list = [params.end_date.isoformat(), source_id, combo]
-    if params.skill_detail or params.group_by in (
-        "branch",
-        "org",
-        "manager",
-        "skill",
-    ):
-        clauses.append("skill_cnt > 0")
     if params.task_type:
         clauses.append(f"{_physical_column('task_type')} = %s")
         values.append(params.task_type)
@@ -471,8 +464,8 @@ async def _fetch_permission_counts(
         return {}
     columns = _permission_dim_columns(combo)
     select_dims = ", ".join(f"r.{column}" for column in columns)
-    clauses = ["i.source_id = %s"]
-    values: list = [sync_date, source_id]
+    clauses: list[str] = []
+    values: list = [source_id, sync_date]
     if filters.get("first_bbk_id"):
         clauses.append("r.first_bbk_id = %s")
         values.append(filters["first_bbk_id"])
@@ -484,14 +477,16 @@ async def _fetch_permission_counts(
         values.append(filters["user_id"])
     group_by = f" GROUP BY {', '.join(columns)}" if columns else ""
     dims_select = select_dims or "'' AS dummy"
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = (
         f"SELECT {dims_select}, "
         "COUNT(DISTINCT r.user_id) AS permission_manager_count "
-        "FROM swe_tenant_init_source i "
+        "FROM (SELECT DISTINCT tenant_id FROM swe_cron_jobs "
+        "WHERE status <> 'deleted' AND source_id = %s) i "
         "LEFT JOIN jkh_user_inf r "
         "ON i.tenant_id = r.user_id AND r.sync_date = %s "
         "AND r.user_id <> '' "
-        f"WHERE {' AND '.join(clauses)}{group_by}"
+        f"{where}{group_by}"
     )
     rows = await db.fetch_all(sql, tuple(values))
     counts: dict[tuple, int] = {}

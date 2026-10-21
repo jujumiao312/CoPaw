@@ -92,7 +92,7 @@ CREATE TABLE swe_rm_claw_list_ind_stat(
 CREATE TABLE jkh_user_inf(user_id TEXT, sync_date TEXT, first_bbk_id TEXT,
     org_id TEXT, first_bbk_nm TEXT, org_nm TEXT, user_name TEXT,
     pst_lvl TEXT);
-CREATE TABLE swe_tenant_init_source(tenant_id TEXT, source_id TEXT);
+CREATE TABLE swe_cron_jobs(tenant_id TEXT, source_id TEXT, status TEXT);
 """
 
 INSERT_SQL = (
@@ -155,8 +155,13 @@ def seed(connection: sqlite3.Connection) -> int:
         ],
     )
     connection.executemany(
-        "INSERT INTO swe_tenant_init_source VALUES(?,?)",
-        [("alice", "S"), ("alice", "S"), ("bob", "S"), ("bob", "OTHER")],
+        "INSERT INTO swe_cron_jobs VALUES(?,?,?)",
+        [
+            ("alice", "S", "active"),
+            ("alice", "S", "active"),
+            ("bob", "S", "active"),
+            ("bob", "OTHER", "active"),
+        ],
     )
     rows = []
     for task_type in TASK_TYPES:
@@ -428,7 +433,6 @@ async def test_skill_dimension_keyword_filters_manager_columns(env):
         sql for sql in queries if "rpt_combo" in sql and "LIMIT" in sql
     )
     assert "rpt_combo = 'manager_skill'" in select_sql
-    assert "skill_cnt > 0" in select_sql
     assert "cm_nm LIKE '%alice%' ESCAPE '!'" in select_sql
     assert "cm_id LIKE '%alice%' ESCAPE '!'" in select_sql
     assert "pst_lvl LIKE '%alice%' ESCAPE '!'" in select_sql
@@ -832,7 +836,7 @@ async def test_permission_counts_use_run_date_and_source(env):
         "UPDATE jkh_user_inf SET sync_date = '2026-09-16' WHERE user_id = 'alice'"
     )
     env.raw.execute(
-        "INSERT INTO swe_tenant_init_source VALUES ('carol', 'OTHER')"
+        "INSERT INTO swe_cron_jobs VALUES ('carol', 'OTHER', 'active')"
     )
     report = await service().get_report(params(), "S", "100")
     assert all(row.permission_manager_count == 1 for row in report.items)
@@ -946,7 +950,7 @@ async def test_permission_left_join_keeps_unmatched_sources_but_counts_only_rost
     from monitor.app.services.report import task_type_snapshot as snapshot
 
     env.raw.execute(
-        "INSERT INTO swe_tenant_init_source VALUES ('unlisted', 'S')"
+        "INSERT INTO swe_cron_jobs VALUES ('unlisted', 'S', 'active')"
     )
     env.raw.execute("DELETE FROM jkh_user_inf WHERE user_id = 'alice'")
     counts = await snapshot._fetch_permission_counts(
@@ -969,7 +973,7 @@ async def test_permission_left_join_keeps_unmatched_sources_but_counts_only_rost
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("group", ["branch", "org", "manager"])
-async def test_skill_details_exclude_zero_counts_before_paging_and_export(
+async def test_skill_details_include_zero_counts_before_paging_and_export(
     env, group
 ):
     env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
@@ -996,34 +1000,38 @@ async def test_skill_details_exclude_zero_counts_before_paging_and_export(
         "skill_detail": True,
         "task_type": "push_plan",
     }
-    paged = {"page": 1, "page_size": 1} if group == "manager" else {}
+    paged = {"page": 1, "page_size": 2} if group == "manager" else {}
     response = await request(query={**query, **paged})
     assert response.status_code == 200
     body = response.json()
-    assert body["total"] == 2
+    assert body["total"] == 4
     assert body["has_more"] is (group == "manager")
     assert [row["skill_id"] for row in body["items"]] == (
-        ["c"] if group == "manager" else ["c", "d"]
+        ["a_zero", "b_null"]
+        if group == "manager"
+        else ["a_zero", "b_null", "c", "d"]
     )
     if paged:
-        second = await request(query={**query, "page": 2, "page_size": 1})
-        assert [row["skill_id"] for row in second.json()["items"]] == ["d"]
+        second = await request(query={**query, "page": 2, "page_size": 2})
+        assert [row["skill_id"] for row in second.json()["items"]] == [
+            "c",
+            "d",
+        ]
         assert second.json()["has_more"] is False
     export = await request(path=f"{BASE_URL}/export", query=query)
     assert export.status_code == 200
     sheet = load_workbook(BytesIO(export.content)).active
-    assert sheet.max_row == 3
+    assert sheet.max_row == 5
     summary = await request(query={**query, "skill_detail": False})
     assert summary.status_code == 200
-    assert summary.json()["total"] == 0
-    assert summary.json()["items"] == []
+    assert summary.json()["total"] == 1
+    assert [row["skill_count"] for row in summary.json()["items"]] == [0]
     env.raw.execute("UPDATE swe_rm_claw_list_ind_stat SET skill_cnt = 0")
-    empty = await request(query={**query, **paged})
-    assert empty.status_code == 200
-    assert empty.json()["items"] == []
-    assert empty.json()["total"] == 0
-    assert empty.json()["has_more"] is False
-    assert "no_matching_skills" in empty.json()["warnings"]
+    kept = await request(query={**query, **paged})
+    assert kept.status_code == 200
+    assert kept.json()["total"] == 4
+    assert kept.json()["items"] != []
+    assert "no_matching_skills" not in kept.json()["warnings"]
 
 
 @pytest.mark.asyncio
@@ -1099,7 +1107,7 @@ async def test_manager_task_counts_and_export(env, detail, task_type):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("group", ["branch", "org", "manager"])
-async def test_summary_zero_skills_filtered_before_total_and_export(
+async def test_summary_zero_skills_kept_before_total_and_export(
     env, group
 ):
     env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
@@ -1114,21 +1122,21 @@ async def test_summary_zero_skills_filtered_before_total_and_export(
     ]
     env.raw.executemany(INSERT_SQL, rows)
     query = dict(end_date=DATE, group_by=group, task_type="push_plan")
-    paging = dict(page=1, page_size=1) if group == "manager" else {}
+    paging = dict(page=1, page_size=2) if group == "manager" else {}
     response = await request(query={**query, **paging})
     assert response.status_code == 200
     body = response.json()
-    assert body["total"] == 2
+    assert body["total"] == 4
     assert body["has_more"] is (group == "manager")
     assert [row["skill_count"] for row in body["items"]] == (
-        [1] if paging else [1, 2]
+        [0, 0] if paging else [0, 0, 1, 2]
     )
     exported = await request(path=f"{BASE_URL}/export", query=query)
     sheet = load_workbook(BytesIO(exported.content)).active
     headers = [cell.value for cell in sheet[1]]
     column = headers.index("技能数") + 1
-    assert sheet.max_row == 3
-    assert [sheet.cell(i, column).value for i in (2, 3)] == [1, 2]
+    assert sheet.max_row == 5
+    assert [sheet.cell(i, column).value for i in (2, 3, 4, 5)] == [0, 0, 1, 2]
 
 
 @pytest.mark.asyncio
@@ -1137,7 +1145,7 @@ async def test_org_permission_count_is_scoped_to_branch_and_org(env):
         "INSERT INTO jkh_user_inf VALUES(?,?,?,?,?,?,?,?)",
         ("dave", DATE, "001", "02", "甲分行", "另一支行", "dave", "L1"),
     )
-    env.raw.execute("INSERT INTO swe_tenant_init_source VALUES('dave', 'S')")
+    env.raw.execute("INSERT INTO swe_cron_jobs VALUES('dave', 'S', 'active')")
     branch = await service().get_report(params(group_by="branch"), "S", "100")
     assert branch.items[0].permission_manager_count == 2
     org = await service().get_report(params(group_by="org"), "S", "100")
@@ -1179,7 +1187,7 @@ async def test_skill_dimension_uses_manager_skill_rows(env):
 
 
 @pytest.mark.asyncio
-async def test_skill_dimension_excludes_zero_skill_count_rows(env):
+async def test_skill_dimension_keeps_zero_skill_count_rows(env):
     env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
     dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
     env.raw.executemany(
@@ -1197,8 +1205,8 @@ async def test_skill_dimension_excludes_zero_skill_count_rows(env):
     report = await service().get_report(
         params(group_by="skill", task_type="push_plan"), "S", "100"
     )
-    assert report.total == 1
-    assert [row.skill_id for row in report.items] == ["c"]
+    assert report.total == 3
+    assert [row.skill_id for row in report.items] == ["a", "b", "c"]
 
 
 @pytest.mark.asyncio

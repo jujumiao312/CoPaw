@@ -299,7 +299,7 @@ def test_permission_denominator_repeats_per_skill(dimension_db, scope):
         "INSERT INTO jkh_user_inf VALUES ('second','2026-09-13','001','01','甲分行','同名支行','第二经理','L2')"
     )
     dimension_db.execute(
-        "INSERT INTO swe_tenant_init_source VALUES ('second','S')"
+        "INSERT INTO swe_cron_jobs VALUES ('jsecond','second','S','k1','active',NULL)"
     )
     scoped = replace(scope, group_by="branch", skill_detail=True)
     rows = assemble(execute(dimension_db, scoped), "branch", True)
