@@ -1035,6 +1035,78 @@ async def test_skill_details_include_zero_counts_before_paging_and_export(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["branch", "org", "manager"])
+async def test_skill_detail_filters_zero_success_execution(env, group):
+    """技能明细只保留成功执行任务数不为 0 的技能行。"""
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                f"{group}_skill",
+                {**dims, "skill_id": skill},
+                "push_plan",
+                suc_execute_job=count,
+            )
+            for skill, count in (("zero", 0), ("one", 1), ("two", 2))
+        ],
+    )
+    report = await service().get_report(
+        params(group_by=group, skill_detail=True, task_type="push_plan"),
+        "S",
+        "100",
+    )
+    assert report.total == 2
+    assert {row.skill_id for row in report.items} == {"one", "two"}
+    assert all(row.suc_execute_job > 0 for row in report.items)
+
+
+@pytest.mark.asyncio
+async def test_skill_dimension_filters_zero_success_execution(env):
+    """技能维度同样按成功执行任务数过滤。"""
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "manager_skill",
+                {**dims, "skill_id": skill},
+                "push_plan",
+                suc_execute_job=count,
+            )
+            for skill, count in (("zero", 0), ("one", 1))
+        ],
+    )
+    report = await service().get_report(
+        params(group_by="skill", task_type="push_plan"), "S", "100"
+    )
+    assert report.total == 1
+    assert report.items[0].skill_id == "one"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group", ["branch", "org", "manager"])
+async def test_summary_keeps_zero_success_execution(env, group):
+    """非技能明细的汇总视图不按成功执行任务数过滤。"""
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    dims = {"first_bbk_id": "001", "org_id": "01", "user_id": "alice"}
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(group, dims, "push_plan", suc_execute_job=count)
+            for count in (0, 1)
+        ],
+    )
+    report = await service().get_report(
+        params(group_by=group, task_type="push_plan"), "S", "100"
+    )
+    assert report.total == 2
+    assert {row.suc_execute_job for row in report.items} == {0, 1}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "group,detail",
     [

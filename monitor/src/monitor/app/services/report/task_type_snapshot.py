@@ -381,6 +381,9 @@ def build_filters(
             "OR pst_lvl LIKE %s ESCAPE '!')"
         )
         values.extend([pattern, pattern, pattern])
+    if _skill_rows(params):
+        # 技能明细/技能维度只保留有成功执行任务的行。
+        clauses.append(f"{_physical_column('suc_execute_job')} <> 0")
     return " AND ".join(clauses), values
 
 
