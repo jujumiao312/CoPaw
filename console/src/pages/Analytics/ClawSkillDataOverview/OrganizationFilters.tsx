@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Select } from "antd";
+import { Alert, Button, Segmented, Select } from "antd";
 import {
   getTaskReportOptions,
   snapshotUnavailable,
   taskReportError,
+  type OrgType,
   type ReportOptionParams,
   type ReportOptions,
   type SnapshotUnavailable,
@@ -56,6 +57,12 @@ function useOptions(params: ReportOptionParams | null) {
     retry: () => setRevision(revision + 1),
   };
 }
+
+/** 支行类型固定两类：零专支行 / 综合支行，无“全部”。 */
+const orgTypes: { label: string; value: OrgType }[] = [
+  { label: "零专支行", value: "zero_special" },
+  { label: "综合支行", value: "frs" },
+];
 
 /** 技能下拉：选项取统计日期当天 manager_skill 组合里去重后的技能名称。 */
 export function SkillFilter({
@@ -111,17 +118,23 @@ export function OrganizationFilters({
   bbk,
   branch,
   org,
+  orgType,
   showOrg,
+  showOrgType,
   onBranchChange,
   onOrgChange,
+  onOrgTypeChange,
 }: {
   endDate: string;
   bbk: string;
   branch?: string;
   org?: string;
+  orgType: OrgType;
   showOrg: boolean;
+  showOrgType: boolean;
   onBranchChange: (value?: string) => void;
   onOrgChange: (value?: string) => void;
+  onOrgTypeChange: (value: OrgType) => void;
 }) {
   const locked = bbk !== "100";
   const branches = useOptions({
@@ -131,7 +144,12 @@ export function OrganizationFilters({
   });
   const orgs = useOptions(
     showOrg && branch
-      ? { end_date: endDate, kind: "orgs", first_bbk_id: branch }
+      ? {
+          end_date: endDate,
+          kind: "orgs",
+          first_bbk_id: branch,
+          org_type: showOrgType ? orgType : undefined,
+        }
       : null,
   );
   const branchOptions = locked
@@ -157,11 +175,22 @@ export function OrganizationFilters({
           placeholder="全部分行"
         />
       </div>
+      {showOrgType && (
+        <div className={styles.field}>
+          <label htmlFor="report-org-type">支行类型</label>
+          <Segmented
+            aria-label="支行类型"
+            options={orgTypes}
+            value={orgType}
+            onChange={onOrgTypeChange}
+          />
+        </div>
+      )}
       {showOrg && (
         <div className={styles.field}>
           <label htmlFor="report-org">支行</label>
           <Select
-            key={`${endDate}-${branch}`}
+            key={`${endDate}-${branch}-${orgType}`}
             id="report-org"
             aria-label="支行"
             showSearch

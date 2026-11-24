@@ -62,10 +62,14 @@ MANAGER_TASK_COLUMNS = (
     ("paused_task_count", "当前暂停任务数"),
 )
 # 指标列顺序固定；任务类型天然不产出的指标在组列时剔除。
+# 新增指标仅落盘快照有值：有推送任务客户经理人数紧跟有权限客户经理数，
+# 总推送任务数位于成功任务数之前；在线导出在 column_labels 里对这两个字段剔除。
 METRIC_COLUMNS = (
     ("skill_count", "技能数"),
     ("permission_manager_count", "有权限客户经理数"),
+    ("new_task_manager_count", "有推送任务客户经理人数"),
     ("active_manager_count", "活跃客户经理数"),
+    ("total_execute_job", "总推送任务数"),
     ("suc_execute_job", "成功任务数"),
     ("read_tasks", "已查看任务数"),
     ("read_rate", "任务查看率（%）"),
@@ -94,6 +98,11 @@ LABELS = {
     **dict(MANAGER_TASK_COLUMNS),
     **COMMON_METRIC_LABELS,
 }
+# 综合支行组合下，网点号/网点名称表头改为综合支行号/综合支行名称。
+FRS_ORG_LABELS = {
+    "org_id": "综合支行号",
+    "org_name": "综合支行名称",
+}
 
 
 def missing_metrics(task_type: str) -> set[str]:
@@ -106,7 +115,12 @@ def missing_metrics(task_type: str) -> set[str]:
 
 
 def column_labels(
-    group_by: str, skill_detail: bool, task_type: str, *, snapshot: bool = False
+    group_by: str,
+    skill_detail: bool,
+    task_type: str,
+    *,
+    snapshot: bool = False,
+    org_type: str = "zero_special",
 ) -> list[tuple[str, str]]:
     """按对应报表取列，只保留该维度与该任务类型真实产出的字段。"""
     fields = list(DIMENSION_COLUMNS[group_by])
@@ -119,11 +133,28 @@ def column_labels(
         if skill_detail or group_by == "skill":
             missing.update(("skill_count", "permission_manager_count"))
         if group_by in ("manager", "skill"):
-            metrics[1:3] = MANAGER_TASK_COLUMNS
+            # 客户经理/技能维度用当前活跃/暂停任务数替换
+            # 有权限/有推送/活跃客户经理人数三个指标。
+            metrics[1:4] = MANAGER_TASK_COLUMNS
+        if group_by == "overall":
+            missing.update(("new_task_manager_count", "total_execute_job"))
+        if skill_detail:
+            missing.add("new_task_manager_count")
+        if task_type != "push_plan":
+            missing.add("total_execute_job")
+    else:
+        # 在线接口不产这两个新增指标。
+        missing.update(("new_task_manager_count", "total_execute_job"))
     fields.extend(field for field, _ in metrics if field not in missing)
     if snapshot:
         fields.extend(COMMON_METRIC_FIELDS)
-    return [(field, LABELS[field]) for field in fields]
+    labels = [(field, LABELS[field]) for field in fields]
+    if snapshot and org_type == "frs" and group_by == "org":
+        labels = [
+            (field, FRS_ORG_LABELS.get(field, label))
+            for field, label in labels
+        ]
+    return labels
 
 
 def _cell(sheet, value, percentage=False):
@@ -153,11 +184,17 @@ def export_task_type_report(report, task_type: str) -> bytes:
             "report_export_too_large",
             "导出超过50000行，请缩小时间或机构范围。",
         )
+    org_type = (
+        "frs"
+        if getattr(report, "rpt_combo", "") in ("org_frs", "org_frs_skill")
+        else "zero_special"
+    )
     columns = column_labels(
         report.group_by,
         report.skill_detail,
         task_type,
         snapshot=report.consistency == "snapshot",
+        org_type=org_type,
     )
     workbook = Workbook(write_only=True)
     sheet = workbook.create_sheet(

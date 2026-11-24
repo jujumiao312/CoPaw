@@ -219,12 +219,24 @@ describe("ClawSkillDataOverview dimension columns", () => {
           "当前活跃任务数",
           "当前暂停任务数",
         ]);
+        expect(headers().slice(8, 10)).toEqual([
+          "总推送任务数",
+          "成功执行任务数",
+        ]);
         expect(headers()).not.toContain("有权限客户经理人数");
+        expect(headers()).not.toContain("有推送任务客户经理人数");
         expect(headers()).not.toContain("活跃客户经理人数");
         expect(await summary.findAllByText("演示经理1")).not.toHaveLength(0);
       } else {
-        expect(headers()).toContain("有权限客户经理人数");
-        expect(headers()).toContain("活跃客户经理人数");
+        const metricStart = headers().indexOf("有权限客户经理人数");
+        expect(metricStart).toBeGreaterThan(-1);
+        expect(headers().slice(metricStart, metricStart + 5)).toEqual([
+          "有权限客户经理人数",
+          "有推送任务客户经理人数",
+          "活跃客户经理人数",
+          "总推送任务数",
+          "成功执行任务数",
+        ]);
       }
       if (group === "org") {
         expect(await summary.findByText("营业部")).toBeInTheDocument();
@@ -245,12 +257,22 @@ describe("ClawSkillDataOverview dimension columns", () => {
       expect(detailStatHeaders).toHaveLength(46);
       expect(detailStatHeaders).toEqual(statMetricTitles);
       expect(detailHeaders).not.toContain("有权限客户经理人数");
+      expect(detailHeaders).not.toContain("有推送任务客户经理人数");
       expect(detailHeaders).toContain(
         group === "manager" ? "当前活跃任务数" : "活跃客户经理人数",
       );
       if (group === "manager") {
         expect(detailHeaders).toContain("当前暂停任务数");
         expect(detailHeaders).not.toContain("活跃客户经理人数");
+        const activeTaskIndex = detailHeaders.indexOf("当前活跃任务数");
+        expect(
+          detailHeaders.slice(activeTaskIndex, activeTaskIndex + 3),
+        ).toEqual(["当前活跃任务数", "当前暂停任务数", "总推送任务数"]);
+      } else {
+        const activeManagerIndex = detailHeaders.indexOf("活跃客户经理人数");
+        expect(
+          detailHeaders.slice(activeManagerIndex, activeManagerIndex + 3),
+        ).toEqual(["活跃客户经理人数", "总推送任务数", "成功执行任务数"]);
       }
       expect(await detail.findByText("客户经营方案生成")).toBeInTheDocument();
     },
@@ -484,7 +506,9 @@ describe("ClawSkillDataOverview table chrome", () => {
 
       const summary = within(screen.getByRole("region", { name: "统计报表" }));
       fireEvent.click(
-        (await summary.findAllByRole("button", { name: /查看.*的技能明细/ }))[0],
+        (
+          await summary.findAllByRole("button", { name: /查看.*的技能明细/ })
+        )[0],
       );
       await waitFor(() =>
         expect(
@@ -702,4 +726,142 @@ describe("ClawSkillDataOverview task type filter", () => {
     expect(screen.getByRole("radio", { name: "主动提问" })).toBeInTheDocument();
     expect(screen.queryByText("主动提问（名单+方案）")).not.toBeInTheDocument();
   });
+
+  it("renames the non-plan push task to 推送（仅方案）", async () => {
+    await renderPage();
+
+    expect(
+      screen.getByRole("radio", { name: "推送（仅方案）" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("radio", { name: "推送（非名单方案）" }),
+    ).toBeNull();
+  });
+});
+
+describe("ClawSkillDataOverview org type filter", () => {
+  it("defaults to 零专支行 without an 全部 option and forwards org_type", async () => {
+    await renderPage();
+
+    // 分行维度不展示支行类型筛选器。
+    expect(screen.queryByRole("radio", { name: "零专支行" })).toBeNull();
+
+    fireEvent.click(screen.getByText("支行维度"));
+
+    const zero = screen.getByRole("radio", { name: "零专支行" });
+    const frs = screen.getByRole("radio", { name: "综合支行" });
+    expect(zero.closest(".ant-segmented-item")?.className).toContain(
+      "ant-segmented-item-selected",
+    );
+    expect(frs.closest(".ant-segmented-item")?.className).not.toContain(
+      "ant-segmented-item-selected",
+    );
+    expect(screen.queryByRole("radio", { name: "全部" })).toBeNull();
+
+    await waitFor(() => {
+      const queries = reportQueries();
+      const query = queries[queries.length - 1];
+      expect(query.searchParams.get("group_by")).toBe("org");
+      expect(query.searchParams.get("org_type")).toBe("zero_special");
+    });
+
+    fireEvent.click(frs);
+    await waitFor(() => {
+      const queries = reportQueries();
+      const query = queries[queries.length - 1];
+      expect(query.searchParams.get("group_by")).toBe("org");
+      expect(query.searchParams.get("org_type")).toBe("frs");
+    });
+  }, 30000);
+
+  it("loads the org dropdown with the selected org type", async () => {
+    vi.mocked(request).mockImplementation(async (url) => {
+      const query = new URL(String(url), "http://localhost");
+      if (query.pathname.endsWith("/dates")) return emptyDates;
+      if (query.pathname.endsWith("/options")) {
+        return query.searchParams.get("kind") === "branches"
+          ? { items: [{ value: "110", label: "深圳分行" }] }
+          : { items: [{ value: "11001", label: "营业部" }] };
+      }
+      return emptyReport;
+    });
+
+    await renderPage();
+    fireEvent.click(screen.getByText("支行维度"));
+
+    const branchSelect = await screen.findByRole("combobox", {
+      name: "分行",
+    });
+    fireEvent.mouseDown(branchSelect);
+    fireEvent.click(
+      await screen.findByText("深圳分行", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("radio", { name: "综合支行" }));
+
+    await waitFor(() => {
+      const orgOptions = vi
+        .mocked(request)
+        .mock.calls.map(([url]) => new URL(String(url), "http://localhost"))
+        .filter(
+          (query) =>
+            query.pathname.endsWith("/options") &&
+            query.searchParams.get("kind") === "orgs",
+        )
+        .slice(-1)[0];
+      expect(orgOptions?.searchParams.get("org_type")).toBe("frs");
+      expect(orgOptions?.searchParams.get("first_bbk_id")).toBe("110");
+    });
+  }, 30000);
+
+  it("scopes the org type filter to the org dimension only", async () => {
+    vi.mocked(request).mockImplementation(async (url) => {
+      const query = new URL(String(url), "http://localhost");
+      if (query.pathname.endsWith("/dates")) return emptyDates;
+      if (query.pathname.endsWith("/options")) {
+        return query.searchParams.get("kind") === "branches"
+          ? { items: [{ value: "110", label: "深圳分行" }] }
+          : { items: [{ value: "11001", label: "营业部" }] };
+      }
+      return emptyReport;
+    });
+
+    await renderPage();
+
+    // org 维度切到综合支行，使 orgType 状态变为 frs。
+    fireEvent.click(screen.getByText("支行维度"));
+    fireEvent.click(screen.getByRole("radio", { name: "综合支行" }));
+
+    // 切到客户经理维度后，支行类型筛选器不应再展示。
+    fireEvent.click(screen.getByText("客户经理维度"));
+    expect(screen.queryByRole("radio", { name: "零专支行" })).toBeNull();
+    expect(screen.queryByRole("radio", { name: "综合支行" })).toBeNull();
+
+    // 选择分行触发支行下拉加载：manager 维度应恒取零专支行，不携带 org_type。
+    const branchSelect = await screen.findByRole("combobox", {
+      name: "分行",
+    });
+    fireEvent.mouseDown(branchSelect);
+    fireEvent.click(
+      await screen.findByText("深圳分行", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+
+    await waitFor(() => {
+      const orgOptions = vi
+        .mocked(request)
+        .mock.calls.map(([url]) => new URL(String(url), "http://localhost"))
+        .filter(
+          (query) =>
+            query.pathname.endsWith("/options") &&
+            query.searchParams.get("kind") === "orgs",
+        )
+        .slice(-1)[0];
+      expect(orgOptions?.searchParams.has("org_type")).toBe(false);
+      expect(orgOptions?.searchParams.get("first_bbk_id")).toBe("110");
+    });
+  }, 30000);
 });

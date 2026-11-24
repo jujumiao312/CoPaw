@@ -10,6 +10,7 @@ import {
 
 export type ReportGroup = "branch" | "org" | "manager" | "skill";
 export type TaskType = "push_plan" | "ask_plan" | "push_other";
+export type OrgType = "zero_special" | "frs";
 export interface ReportParams {
   start_date: string;
   end_date: string;
@@ -19,6 +20,7 @@ export interface ReportParams {
   skill_name?: string;
   first_bbk_id?: string;
   org_id?: string;
+  org_type?: OrgType;
   user_id?: string;
   keyword?: string;
   page?: number;
@@ -57,9 +59,11 @@ export type ReportRow = {
   task_type_name: string;
   skill_count: number | null;
   permission_manager_count: number | null;
+  new_task_manager_count: number | null;
   active_manager_count: number | null;
   active_task_count?: number | null;
   paused_task_count?: number | null;
+  total_execute_job: number | null;
   suc_execute_job: number;
   read_tasks: number;
   read_rate: number | null;
@@ -86,6 +90,7 @@ export interface ReportOptionParams {
   end_date: string;
   kind: "branches" | "orgs" | "skills";
   first_bbk_id?: string;
+  org_type?: OrgType;
 }
 export interface ReportOptions {
   sync_date: string | null;

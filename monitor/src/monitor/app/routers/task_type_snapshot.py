@@ -99,6 +99,9 @@ def snapshot_params(
     first_bbk_name: str | None = Query(default=None, max_length=256),
     org_id: str | None = Query(default=None, max_length=64),
     org_name: str | None = Query(default=None, max_length=256),
+    org_type: str = Query(
+        default="zero_special", description="支行类型：zero_special/frs"
+    ),
 ) -> SnapshotReportParams:
     try:
         return SnapshotReportParams(
@@ -109,6 +112,7 @@ def snapshot_params(
             first_bbk_name=first_bbk_name,
             org_id=org_id,
             org_name=org_name,
+            org_type=org_type,
         )
     except ValidationError as exc:
         raise _validation_error(exc.errors(include_context=False)) from exc
@@ -176,10 +180,16 @@ def options_params(
     end_date: str = Query(description="跑数日期 YYYY-MM-DD"),
     kind: str = Query(description="branches、orgs 或 skills"),
     first_bbk_id: str | None = Query(default=None, max_length=64),
+    org_type: str = Query(
+        default="zero_special", description="支行类型：zero_special/frs"
+    ),
 ) -> ReportOptionsParams:
     try:
         return ReportOptionsParams(
-            end_date=end_date, kind=kind, first_bbk_id=first_bbk_id
+            end_date=end_date,
+            kind=kind,
+            first_bbk_id=first_bbk_id,
+            org_type=org_type,
         )
     except ValidationError as exc:
         raise _validation_error(exc.errors(include_context=False)) from exc

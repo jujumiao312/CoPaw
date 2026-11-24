@@ -30,6 +30,7 @@ import {
   type ReportParams,
   type ReportDateWindow,
   type TaskType,
+  type OrgType,
 } from "../../../api/modules/taskTypeReport";
 import { useIframeStore } from "../../../stores/iframeStore";
 import { isTaskReportDemo } from "../../../api/modules/taskTypeReportDemo";
@@ -45,12 +46,14 @@ const groups: { label: string; value: ReportGroup }[] = [
 ];
 const tasks: { label: string; value: TaskType }[] = [
   { label: "推送（名单+方案）", value: "push_plan" },
-  { label: "推送（非名单方案）", value: "push_other" },
+  { label: "推送（仅方案）", value: "push_other" },
   { label: "主动提问", value: "ask_plan" },
 ];
 const leadingMetrics = [
   ["permission_manager_count", "有权限客户经理人数"],
+  ["new_task_manager_count", "有推送任务客户经理人数"],
   ["active_manager_count", "活跃客户经理人数"],
+  ["total_execute_job", "总推送任务数"],
   ["suc_execute_job", "成功执行任务数"],
   ["read_tasks", "客户经理已查看任务数"],
   ["read_rate", "任务查看率"],
@@ -122,9 +125,9 @@ function metricColumns(params: ReportParams): ColumnsType<ReportRow> {
         ["paused_task_count", "当前暂停任务数"],
       ] as const)
     : params.skill_detail
-    ? metrics.slice(1, 2)
-    : metrics.slice(0, 2);
-  return [...leadingMetrics, ...metrics.slice(2)].map(([key, title]) => ({
+    ? metrics.slice(2, 3)
+    : metrics.slice(0, 3);
+  return [...leadingMetrics, ...metrics.slice(3)].map(([key, title]) => ({
     title,
     dataIndex: key,
     width: metricColumnWidth(title),
@@ -530,6 +533,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
   const [task, setTask] = useState<TaskType>("push_plan");
   const [branch, setBranch] = useState<string>(bbk === "100" ? "" : bbk);
   const [org, setOrg] = useState<string>();
+  const [orgType, setOrgType] = useState<OrgType>("zero_special");
   const [skill, setSkill] = useState<string>();
   const [search, setSearch] = useState("");
   const [keyword, setKeyword] = useState("");
@@ -554,6 +558,7 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
     task_type: task,
     first_bbk_id: branch || undefined,
     org_id: group === "branch" ? undefined : org,
+    org_type: group === "org" ? orgType : undefined,
     skill_name: group === "skill" ? skill || undefined : undefined,
     keyword: managerScoped(group) ? keyword || undefined : undefined,
   };
@@ -626,13 +631,20 @@ function ScopedReportPage({ bbk }: { bbk: string }) {
             bbk={bbk}
             branch={branch || undefined}
             org={org}
+            orgType={orgType}
             showOrg={group !== "branch"}
+            showOrgType={group === "org"}
             onBranchChange={(value) => {
               setBranch(value || "");
               setOrg(undefined);
               setSkill(undefined);
             }}
             onOrgChange={setOrg}
+            onOrgTypeChange={(value) => {
+              setOrgType(value);
+              setOrg(undefined);
+              setSkill(undefined);
+            }}
           />
           {group === "skill" && (
             <SkillFilter

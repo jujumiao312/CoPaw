@@ -44,6 +44,19 @@ describe("模拟看板数据", () => {
       expect(plan?.phone_count).toBeGreaterThan(
         plan?.phone_customer_count ?? 0,
       );
+      const other = report.items.find((row) => row.task_type === "push_other");
+      const ask = report.items.find((row) => row.task_type === "ask_plan");
+      expect(plan?.total_execute_job).not.toBeNull();
+      expect(other?.total_execute_job).toBeNull();
+      expect(ask?.total_execute_job).toBeNull();
+      if (group_by === "branch" || group_by === "org") {
+        expect(plan?.new_task_manager_count).not.toBeNull();
+      } else {
+        expect(plan?.new_task_manager_count).toBeNull();
+      }
+      expect(selected.every((row) => row.new_task_manager_count == null)).toBe(
+        true,
+      );
     }
   });
 });

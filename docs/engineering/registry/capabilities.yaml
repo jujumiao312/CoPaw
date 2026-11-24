@@ -1,0 +1,72 @@
+# 功能索引（工程知识库注册表）
+# 本文件仅收录已完成工程知识分析的业务功能记录。
+# 字段约定：
+#   - id            功能 ID，全局唯一（CAP-XXX）
+#   - name          功能名称
+#   - aliases       已知别名
+#   - description   功能描述（一句话）
+#   - projects      所属工程
+#   - frontend      前端代码映射
+#   - backend       后端代码映射
+#   - related_modules 关联技术模块
+#   - tests         测试路径
+#   - doc_path      功能文档路径
+#   - confidence    知识可信度（high / medium / low）
+capabilities:
+  - id: CAP-001
+    name: claw技能运行看板
+    aliases:
+      - Claw 技能运行看板
+      - 金葵花任务类型报表
+      - task-type report
+    description: >-
+      按机构（分行/支行，支行支持零专/综合拆分）、客户经理、技能维度统计三类客户经营任务
+      （推送名单+方案、推送仅方案、主动提问）的运行表现与经营转化指标，
+      数据来自预聚合落盘表 swe_rm_claw_list_ind_stat（高斯 → TDSQL）。
+    projects:
+      - console
+      - monitor
+    frontend:
+      page: console/src/pages/Analytics/ClawSkillDataOverview/
+      entry_component: console/src/pages/Analytics/ClawSkillDataOverview/index.tsx
+      route: /analytics/claw-skill-data-overview
+      menu:
+        file: console/src/layouts/Sidebar.tsx
+        key: analytics-claw-skill-data-overview
+        i18n: nav.analyticsClawSkillDataOverview
+      api_client:
+        - console/src/api/modules/taskTypeReport.ts
+        - console/src/api/modules/taskTypeReportDemo.ts
+    backend:
+      snapshot_router: monitor/src/monitor/app/routers/task_type_snapshot.py
+      snapshot_service: monitor/src/monitor/app/services/report/task_type_snapshot.py
+      snapshot_model: monitor/src/monitor/app/models/task_type_snapshot.py
+      online_router: monitor/src/monitor/app/routers/task_type_report.py
+      online_service: monitor/src/monitor/app/services/cron/task_type_report.py
+      online_sql: monitor/src/monitor/app/services/cron/task_type_report_sql.py
+      online_rows: monitor/src/monitor/app/services/cron/task_type_report_rows.py
+      export: monitor/src/monitor/app/services/cron/task_type_report_export.py
+      shared_model: monitor/src/monitor/app/models/task_type_report.py
+      table_ddl: monitor/src/monitor/app/database/schema.py
+    related_modules:
+      - monitor/src/monitor/app/database/connection.py
+      - monitor/src/monitor/app/services/cron/query_service.py
+      - console/src/api/authHeaders.ts
+      - console/src/api/request.ts
+      - console/src/api/config.ts
+    data_sources:
+      - swe_rm_claw_list_ind_stat
+      - jkh_user_inf
+    tests:
+      backend:
+        - monitor/tests/test_task_type_report_snapshot.py
+        - monitor/tests/test_task_type_report_api.py
+        - monitor/tests/test_task_type_report_queries.py
+        - monitor/tests/test_task_type_report_dimensions.py
+        - monitor/tests/test_task_type_report_console.py
+      frontend:
+        - console/src/pages/Analytics/ClawSkillDataOverview/index.test.tsx
+        - console/src/api/modules/taskTypeReport.test.ts
+        - console/src/api/modules/taskTypeReportDemo.test.ts
+    doc_path: docs/engineering/capabilities/CAP-001.md
+    confidence: high

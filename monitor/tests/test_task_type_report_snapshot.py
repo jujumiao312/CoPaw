@@ -24,8 +24,10 @@ from monitor.app.models.task_type_report import (
 from monitor.app.models.task_type_snapshot import SnapshotReportParams
 from monitor.app.services.cron import task_type_report as cron_report
 from monitor.app.services.report.task_type_snapshot import (
+    EXPECTED_COMBOS,
     SNAPSHOT_SOURCE_COLUMNS,
     TaskTypeSnapshotService,
+    combo_of,
 )
 
 BASE_URL = "/api/monitor/report/task-type"
@@ -36,7 +38,7 @@ TASK_TYPES = ("push_plan", "ask_plan", "push_other")
 LABELS = {
     "push_plan": "推送(名单+方案)",
     "ask_plan": "主动提问",
-    "push_other": "推送(非名单方案)",
+    "push_other": "推送(仅方案)",
 }
 
 
@@ -76,10 +78,13 @@ CREATE TABLE swe_rm_claw_list_ind_stat(
     rpt_combo TEXT, job_type TEXT, frs_bbk_org_id TEXT DEFAULT '',
     brn_org_id TEXT DEFAULT '', cm_id TEXT DEFAULT '',
     skill_id TEXT DEFAULT '', frs_bbk_org_nm TEXT DEFAULT '',
-    brn_org_nm TEXT DEFAULT '', cm_nm TEXT DEFAULT '',
+    brn_org_nm TEXT DEFAULT '', frs_brn_org_id TEXT DEFAULT '',
+    frs_brn_org_nm TEXT DEFAULT '', cm_nm TEXT DEFAULT '',
     pst_lvl TEXT DEFAULT '', skill_nm TEXT DEFAULT '',
     job_type_nm TEXT DEFAULT '', skill_cnt INTEGER DEFAULT 0,
-    active_manager_cnt INTEGER, active_job_cnt INTEGER, paused_job_cnt INTEGER,
+    auth_manager_cnt INTEGER, active_manager_cnt INTEGER,
+    new_task_manager_cnt INTEGER, active_job_cnt INTEGER,
+    paused_job_cnt INTEGER, total_execute_job INTEGER DEFAULT 0,
     suc_execute_job INTEGER DEFAULT 0,
     read_tasks INTEGER DEFAULT 0, read_rate REAL,
     recommended_customers INTEGER, read_customer_cnt INTEGER,
@@ -98,15 +103,19 @@ CREATE TABLE swe_cron_jobs(tenant_id TEXT, source_id TEXT, status TEXT);
 INSERT_SQL = (
     "INSERT INTO swe_rm_claw_list_ind_stat ("
     "dw_dat_dt, source_id, rpt_combo, job_type, frs_bbk_org_id, "
-    "brn_org_id, cm_id, skill_id, frs_bbk_org_nm, brn_org_nm, cm_nm, "
-    "pst_lvl, skill_nm, job_type_nm, skill_cnt, active_manager_cnt, "
-    "suc_execute_job, read_tasks, read_rate, recommended_customers, "
+    "brn_org_id, frs_brn_org_id, cm_id, skill_id, frs_bbk_org_nm, "
+    "brn_org_nm, frs_brn_org_nm, cm_nm, pst_lvl, skill_nm, job_type_nm, "
+    "skill_cnt, auth_manager_cnt, active_manager_cnt, "
+    "new_task_manager_cnt, total_execute_job, suc_execute_job, "
+    "read_tasks, read_rate, recommended_customers, "
     "stat_start_dt, stat_end_dt) VALUES ("
     ":prt_dt, :source_id, :rpt_combo, :task_type, :first_bbk_id, "
-    ":org_id, :user_id, :skill_id, :first_bbk_nm, :org_nm, :user_name, "
-    ":pst_lvl, :cn_name, :task_type_name, :skill_cnt, "
-    ":active_manager_cnt, :suc_execute_job, :read_tasks, :read_rate, "
-    ":recommended_customers, :stat_start_dt, :stat_end_dt)"
+    ":org_id, :frs_brn_org_id, :user_id, :skill_id, :first_bbk_nm, "
+    ":org_nm, :frs_brn_org_nm, :user_name, :pst_lvl, :cn_name, "
+    ":task_type_name, :skill_cnt, :auth_manager_cnt, :active_manager_cnt, "
+    ":new_task_manager_cnt, :total_execute_job, :suc_execute_job, "
+    ":read_tasks, :read_rate, :recommended_customers, "
+    ":stat_start_dt, :stat_end_dt)"
 )
 
 
@@ -120,18 +129,23 @@ def snapshot_row(combo, dims, task_type, **metrics):
         "task_type_name": LABELS[task_type],
         "first_bbk_id": "",
         "org_id": "",
+        "frs_brn_org_id": "",
         "user_id": "",
         "skill_id": "",
         "first_bbk_nm": (
             "甲分行" if dims.get("first_bbk_id") == "001" else "乙分行"
         ),
         "org_nm": "同名支行",
+        "frs_brn_org_nm": "综合支行",
         "user_name": "alice" if dims.get("user_id") == "alice" else "bob",
         "pst_lvl": "L2" if dims.get("user_id") == "alice" else "L1",
         "cn_name": "技能一" if dims.get("skill_id") else "",
         "stat_start_dt": "2026-09-01",
         "stat_end_dt": DATE,
         "skill_cnt": 1,
+        "auth_manager_cnt": 1,
+        "new_task_manager_cnt": 1,
+        "total_execute_job": 3,
         "suc_execute_job": 3,
         "read_tasks": 2,
         "read_rate": 66.67,
@@ -546,7 +560,7 @@ async def test_dates_and_status(env):
     counts = {item.rpt_combo: item.row_cnt for item in status.combo_counts}
     assert counts["manager"] == 6
     assert counts["overall"] == 3
-    assert status.missing_combos == ["org_skill"]
+    assert status.missing_combos == ["org_frs", "org_skill", "org_frs_skill"]
 
 
 @pytest.mark.asyncio
@@ -700,7 +714,11 @@ async def test_http_dates_status_and_options(env):
     assert len(scoped.json()["items"]) == 1
     status = await request(path=f"{BASE_URL}/status", query={"end_date": DATE})
     assert status.status_code == 200
-    assert status.json()["missing_combos"] == ["org_skill"]
+    assert status.json()["missing_combos"] == [
+        "org_frs",
+        "org_skill",
+        "org_frs_skill",
+    ]
     options_response = await request(
         path=f"{BASE_URL}/options",
         query={"end_date": DATE, "kind": "branches"},
@@ -805,6 +823,13 @@ def test_selected_columns_exist_in_table_ddl():
         schema.CREATE_TASK_TYPE_REPORT_SNAPSHOT_TABLE
     )
     assert set(SNAPSHOT_SOURCE_COLUMNS) <= snapshot_columns
+    # 综合支行列不在 SNAPSHOT_SOURCE_COLUMNS 的零专映射里，但必须建在表中。
+    assert {"frs_brn_org_id", "frs_brn_org_nm"} <= snapshot_columns
+    assert {
+        "auth_manager_cnt",
+        "new_task_manager_cnt",
+        "total_execute_job",
+    } <= snapshot_columns
 
 
 @pytest.mark.asyncio
@@ -831,17 +856,16 @@ async def test_dates_aggregate_rows_and_filter_source_month_limit(env):
 
 
 @pytest.mark.asyncio
-async def test_permission_counts_use_run_date_and_source(env):
+async def test_permission_counts_read_auth_manager_cnt(env):
+    """有权限客户经理人数直接读仓内落盘列，不再实时 JOIN 名单。"""
     env.raw.execute(
-        "UPDATE jkh_user_inf SET sync_date = '2026-09-16' WHERE user_id = 'alice'"
-    )
-    env.raw.execute(
-        "INSERT INTO swe_cron_jobs VALUES ('carol', 'OTHER', 'active')"
+        "UPDATE swe_rm_claw_list_ind_stat SET auth_manager_cnt = 5 "
+        "WHERE rpt_combo = 'overall' AND source_id = 'S'"
     )
     report = await service().get_report(params(), "S", "100")
-    assert all(row.permission_manager_count == 1 for row in report.items)
+    assert all(row.permission_manager_count == 5 for row in report.items)
     other = await service().get_report(params(), "OTHER", "100")
-    assert other.items[0].permission_manager_count == 2
+    assert other.items[0].permission_manager_count == 0
 
 
 @pytest.mark.asyncio
@@ -921,15 +945,12 @@ async def test_options_return_empty_when_roster_has_no_dates(env):
 
 
 @pytest.mark.asyncio
-async def test_permission_counts_default_missing_and_null_to_zero(
-    env, monkeypatch
-):
-    from monitor.app.services.report import task_type_snapshot as snapshot
-
-    async def missing_counts(*args):
-        return {("001", "01"): None}
-
-    monkeypatch.setattr(snapshot, "_fetch_permission_counts", missing_counts)
+async def test_permission_counts_null_column_reads_zero(env):
+    """auth_manager_cnt 为空时按改造前口径还原为 0。"""
+    env.raw.execute(
+        "UPDATE swe_rm_claw_list_ind_stat SET auth_manager_cnt = NULL "
+        "WHERE rpt_combo = 'org'"
+    )
     response = await request(
         query={
             "end_date": DATE,
@@ -944,29 +965,18 @@ async def test_permission_counts_default_missing_and_null_to_zero(
 
 
 @pytest.mark.asyncio
-async def test_permission_left_join_keeps_unmatched_sources_but_counts_only_roster(
-    env,
-):
-    from monitor.app.services.report import task_type_snapshot as snapshot
-
-    env.raw.execute(
-        "INSERT INTO swe_cron_jobs VALUES ('unlisted', 'S', 'active')"
-    )
-    env.raw.execute("DELETE FROM jkh_user_inf WHERE user_id = 'alice'")
-    counts = await snapshot._fetch_permission_counts(
-        env.connection, {"sync_date": DATE}, "S", "manager", {}
-    )
-    assert counts[("", "", "")] == 0
-    assert counts[("002", "01", "bob")] == 1
+async def test_permission_counts_null_for_manager_and_skill_rows(env):
+    """有权限客户经理人数仅总体/分行/支行有值，经理/技能维度保持 null。"""
     report = await service().get_report(params(group_by="manager"), "S", "100")
     assert {
-        row.permission_manager_count
-        for row in report.items
-        if row.user_id == "alice"
+        row.permission_manager_count for row in report.items
     } == {None}
     overall = await service().get_report(params(), "S", "100")
     assert {row.permission_manager_count for row in overall.items} == {1}
-    env.raw.execute("DELETE FROM jkh_user_inf")
+    env.raw.execute(
+        "UPDATE swe_rm_claw_list_ind_stat SET auth_manager_cnt = NULL "
+        "WHERE rpt_combo = 'overall'"
+    )
     empty = await service().get_report(params(), "S", "100")
     assert {row.permission_manager_count for row in empty.items} == {0}
 
@@ -1116,20 +1126,12 @@ async def test_summary_keeps_zero_success_execution(env, group):
         ("manager", False),
     ],
 )
-async def test_unused_metrics_do_not_query(env, monkeypatch, group, detail):
-    from unittest.mock import AsyncMock
-    from monitor.app.services.report import task_type_snapshot as snapshot
-
-    permissions = AsyncMock(
-        side_effect=AssertionError("unused permission query")
-    )
-    monkeypatch.setattr(snapshot, "_fetch_permission_counts", permissions)
+async def test_unused_metrics_do_not_query(env, group, detail):
     queries = []
     env.raw.set_trace_callback(queries.append)
     report = await service().get_report(
         params(group_by=group, skill_detail=detail), "S", "100"
     )
-    permissions.assert_not_awaited()
     assert all(row.permission_manager_count is None for row in report.items)
     selects = [
         sql.split(" FROM ")[0]
@@ -1213,11 +1215,11 @@ async def test_summary_zero_skills_kept_before_total_and_export(
 
 @pytest.mark.asyncio
 async def test_org_permission_count_is_scoped_to_branch_and_org(env):
+    """auth_manager_cnt 按分行/支行行读值，不再跨维度实时 JOIN。"""
     env.raw.execute(
-        "INSERT INTO jkh_user_inf VALUES(?,?,?,?,?,?,?,?)",
-        ("dave", DATE, "001", "02", "甲分行", "另一支行", "dave", "L1"),
+        "UPDATE swe_rm_claw_list_ind_stat SET auth_manager_cnt = 2 "
+        "WHERE rpt_combo = 'branch' AND frs_bbk_org_id = '001'"
     )
-    env.raw.execute("INSERT INTO swe_cron_jobs VALUES('dave', 'S', 'active')")
     branch = await service().get_report(params(group_by="branch"), "S", "100")
     assert branch.items[0].permission_manager_count == 2
     org = await service().get_report(params(group_by="org"), "S", "100")
@@ -1552,3 +1554,340 @@ async def test_skill_dimension_export_columns(env):
         },
     )
     assert with_detail.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "group_by,skill_detail,org_type,expected",
+    [
+        ("org", False, "zero_special", "org"),
+        ("org", False, "frs", "org_frs"),
+        ("org", True, "zero_special", "org_skill"),
+        ("org", True, "frs", "org_frs_skill"),
+        ("branch", False, "frs", "branch"),
+        ("manager", True, "frs", "manager_skill"),
+    ],
+)
+def test_combo_mapping_with_org_type(group_by, skill_detail, org_type, expected):
+    """org_type 仅对 org 维度生效，其余维度维持原组合。"""
+    assert combo_of(
+        SnapshotReportParams(
+            end_date=DATE,
+            group_by=group_by,
+            skill_detail=skill_detail,
+            org_type=org_type,
+        )
+    ) == expected
+
+
+def test_expected_combos_has_nine_combos():
+    assert len(EXPECTED_COMBOS) == 9
+    assert set(EXPECTED_COMBOS) == {
+        "overall",
+        "branch",
+        "org",
+        "org_frs",
+        "manager",
+        "branch_skill",
+        "org_skill",
+        "org_frs_skill",
+        "manager_skill",
+    }
+
+
+@pytest.mark.asyncio
+async def test_org_type_invalid_returns_422(env):
+    cases = [
+        (BASE_URL, {"end_date": DATE, "group_by": "org", "org_type": "bad"}),
+        (
+            f"{BASE_URL}/options",
+            {"end_date": DATE, "kind": "orgs", "first_bbk_id": "001", "org_type": "bad"},
+        ),
+        (
+            f"{BASE_URL}/export",
+            {"end_date": DATE, "group_by": "org", "task_type": "push_plan", "org_type": "bad"},
+        ),
+    ]
+    for path, query in cases:
+        response = await request(path=path, query=query)
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "report_validation_error"
+
+
+@pytest.mark.asyncio
+async def test_org_frs_queries_frs_columns(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "001",
+                    "frs_brn_org_id": "F01",
+                    "frs_brn_org_nm": "综合一支行",
+                },
+                "push_plan",
+                total_execute_job=11,
+                new_task_manager_cnt=7,
+            ),
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "001",
+                    "frs_brn_org_id": "F02",
+                    "frs_brn_org_nm": "综合二支行",
+                },
+                "ask_plan",
+            ),
+        ],
+    )
+    report = await service().get_report(
+        params(group_by="org", org_type="frs"), "S", "100"
+    )
+    assert report.rpt_combo == "org_frs"
+    assert {row.org_id for row in report.items} == {"F01", "F02"}
+    assert {row.org_name for row in report.items} == {
+        "综合一支行",
+        "综合二支行",
+    }
+    by_id = {row.org_id: row for row in report.items}
+    assert by_id["F01"].new_task_manager_count == 7
+    assert by_id["F01"].total_execute_job == 11
+    assert by_id["F02"].total_execute_job is None  # ask_plan 不产总推送任务数
+
+
+@pytest.mark.asyncio
+async def test_org_frs_skill_down_drill_routes_combo(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "org_frs_skill",
+                {
+                    "first_bbk_id": "001",
+                    "frs_brn_org_id": "F01",
+                    "frs_brn_org_nm": "综合一",
+                    "skill_id": "k1",
+                },
+                "push_plan",
+                suc_execute_job=5,
+                total_execute_job=8,
+            ),
+        ],
+    )
+    report = await service().get_report(
+        params(
+            group_by="org",
+            org_type="frs",
+            skill_detail=True,
+            task_type="push_plan",
+        ),
+        "S",
+        "100",
+    )
+    assert report.rpt_combo == "org_frs_skill"
+    assert report.items[0].org_id == "F01"
+    assert report.items[0].org_name == "综合一"
+    assert report.items[0].skill_id == "k1"
+    assert report.items[0].total_execute_job == 8
+    assert report.items[0].new_task_manager_count is None
+
+
+@pytest.mark.asyncio
+async def test_options_frs_orgs_from_snapshot(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "001",
+                    "frs_brn_org_id": "F01",
+                    "frs_brn_org_nm": "综合一",
+                },
+                "push_plan",
+            ),
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "001",
+                    "frs_brn_org_id": "F02",
+                    "frs_brn_org_nm": "综合二",
+                },
+                "push_plan",
+            ),
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "002",
+                    "frs_brn_org_id": "F03",
+                    "frs_brn_org_nm": "综合三",
+                },
+                "push_plan",
+            ),
+        ],
+    )
+    orgs = await service().get_options(
+        ReportOptionsParams(
+            end_date=DATE_VALUE,
+            kind="orgs",
+            first_bbk_id="001",
+            org_type="frs",
+        ),
+        "S",
+        "100",
+    )
+    assert orgs.sync_date == DATE
+    assert [item.value for item in orgs.items] == ["F01", "F02"]
+    assert [item.label for item in orgs.items] == ["综合一", "综合二"]
+
+
+@pytest.mark.asyncio
+async def test_org_frs_name_resolution_and_ambiguous(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "001",
+                    "frs_brn_org_id": "F01",
+                    "frs_brn_org_nm": "同名综合",
+                },
+                "push_plan",
+            ),
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "002",
+                    "frs_brn_org_id": "F02",
+                    "frs_brn_org_nm": "同名综合",
+                },
+                "push_plan",
+            ),
+        ],
+    )
+    with pytest.raises(cron_report.ReportError) as excinfo:
+        await service().get_report(
+            params(group_by="org", org_type="frs", org_name="同名综合"),
+            "S",
+            "100",
+        )
+    assert excinfo.value.code == "organization_name_ambiguous"
+    resolved = await service().get_report(
+        params(
+            group_by="org",
+            org_type="frs",
+            first_bbk_id="001",
+            org_name="同名综合",
+        ),
+        "S",
+        "100",
+    )
+    assert resolved.resolved_filters.org_id == "F01"
+    assert {row.org_id for row in resolved.items} == {"F01"}
+
+
+@pytest.mark.asyncio
+async def test_new_metrics_scope_and_task_type(env):
+    branch = await service().get_report(
+        params(group_by="branch", task_type="push_plan"), "S", "100"
+    )
+    plan = {row.first_bbk_id: row for row in branch.items}
+    assert plan["001"].new_task_manager_count == 1
+    assert plan["001"].total_execute_job == 3
+    ask = await service().get_report(
+        params(group_by="branch", task_type="ask_plan"), "S", "100"
+    )
+    assert all(row.total_execute_job is None for row in ask.items)
+    manager = await service().get_report(
+        params(group_by="manager", task_type="push_plan"), "S", "100"
+    )
+    assert all(row.new_task_manager_count is None for row in manager.items)
+    assert all(row.total_execute_job == 3 for row in manager.items)
+    overall = await service().get_report(params(), "S", "100")
+    assert all(row.new_task_manager_count is None for row in overall.items)
+    assert all(row.total_execute_job is None for row in overall.items)
+
+
+@pytest.mark.asyncio
+async def test_export_includes_new_columns_and_trims_by_combo(env):
+    response = await request(
+        path=f"{BASE_URL}/export",
+        query={
+            "end_date": DATE,
+            "group_by": "branch",
+            "task_type": "push_plan",
+        },
+    )
+    assert response.status_code == 200
+    headers = [cell.value for cell in load_workbook(BytesIO(response.content)).active[1]]
+    assert "有推送任务客户经理人数" in headers
+    assert "总推送任务数" in headers
+    assert headers.index("有推送任务客户经理人数") == headers.index("有权限客户经理数") + 1
+    assert headers.index("总推送任务数") == headers.index("成功任务数") - 1
+    other = await request(
+        path=f"{BASE_URL}/export",
+        query={
+            "end_date": DATE,
+            "group_by": "branch",
+            "task_type": "push_other",
+        },
+    )
+    other_headers = [
+        cell.value for cell in load_workbook(BytesIO(other.content)).active[1]
+    ]
+    assert "总推送任务数" not in other_headers
+    manager = await request(
+        path=f"{BASE_URL}/export",
+        query={
+            "end_date": DATE,
+            "group_by": "manager",
+            "task_type": "push_plan",
+        },
+    )
+    manager_headers = [
+        cell.value for cell in load_workbook(BytesIO(manager.content)).active[1]
+    ]
+    assert "有推送任务客户经理人数" not in manager_headers
+    assert "总推送任务数" in manager_headers
+
+
+@pytest.mark.asyncio
+async def test_export_org_frs_uses_frs_headers(env):
+    env.raw.execute("DELETE FROM swe_rm_claw_list_ind_stat")
+    env.raw.executemany(
+        INSERT_SQL,
+        [
+            snapshot_row(
+                "org_frs",
+                {
+                    "first_bbk_id": "001",
+                    "frs_brn_org_id": "F01",
+                    "frs_brn_org_nm": "综合一支行",
+                },
+                "push_plan",
+            ),
+        ],
+    )
+    response = await request(
+        path=f"{BASE_URL}/export",
+        query={
+            "end_date": DATE,
+            "group_by": "org",
+            "org_type": "frs",
+            "task_type": "push_plan",
+        },
+    )
+    assert response.status_code == 200
+    sheet = load_workbook(BytesIO(response.content)).active
+    headers = [cell.value for cell in sheet[1]]
+    assert "综合支行号" in headers
+    assert "综合支行名称" in headers
+    assert "网点号" not in headers
+    assert "网点名称" not in headers
+    assert sheet["C1"].value == "综合支行号"
+    assert sheet["D1"].value == "综合支行名称"

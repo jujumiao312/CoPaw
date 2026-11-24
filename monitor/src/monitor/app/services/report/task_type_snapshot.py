@@ -59,41 +59,60 @@ COLUMN_MAP = {
     "task_type": "job_type",
     "first_bbk_id": "frs_bbk_org_id",
     "first_bbk_nm": "frs_bbk_org_nm",
-    "org_id": "brn_org_id",
-    "org_nm": "brn_org_nm",
     "user_id": "cm_id",
     "user_name": "cm_nm",
     "cn_name": "skill_nm",
     "task_type_name": "job_type_nm",
 }
+# 综合支行组合：逻辑 org_id/org_nm 读 frs_brn_org_id/frs_brn_org_nm，
+# 零专支行组合维持 brn_org_id/brn_org_nm。
+FRS_COMBOS = ("org_frs", "org_frs_skill")
+ORG_ID_COLUMNS = {
+    "org_id": ("brn_org_id", "frs_brn_org_id"),
+    "org_nm": ("brn_org_nm", "frs_brn_org_nm"),
+}
 
 
-def _physical_column(column: str) -> str:
-    return COLUMN_MAP.get(column, column)
+def _org_column(column: str, combo: str | None) -> str:
+    if column in ORG_ID_COLUMNS:
+        zero, frs = ORG_ID_COLUMNS[column]
+        return frs if combo in FRS_COMBOS else zero
+    return column
 
 
-def _select_column(column: str) -> str:
-    physical = _physical_column(column)
+def _physical_column(column: str, combo: str | None = None) -> str:
+    mapped = COLUMN_MAP.get(column)
+    if mapped is not None:
+        return mapped
+    return _org_column(column, combo)
+
+
+def _select_column(column: str, combo: str | None = None) -> str:
+    physical = _physical_column(column, combo)
     return column if physical == column else f"{physical} AS {column}"
 
-# 接口组合 -> 落盘表组合标签
+# 接口组合 -> 落盘表组合标签；org_type 仅对 org 维度生效。
 COMBO_MAP = {
-    ("overall", False): "overall",
-    ("branch", False): "branch",
-    ("org", False): "org",
-    ("manager", False): "manager",
-    ("skill", False): "manager_skill",
-    ("branch", True): "branch_skill",
-    ("org", True): "org_skill",
-    ("manager", True): "manager_skill",
+    ("overall", False, "zero_special"): "overall",
+    ("branch", False, "zero_special"): "branch",
+    ("org", False, "zero_special"): "org",
+    ("org", False, "frs"): "org_frs",
+    ("manager", False, "zero_special"): "manager",
+    ("skill", False, "zero_special"): "manager_skill",
+    ("branch", True, "zero_special"): "branch_skill",
+    ("org", True, "zero_special"): "org_skill",
+    ("org", True, "frs"): "org_frs_skill",
+    ("manager", True, "zero_special"): "manager_skill",
 }
 EXPECTED_COMBOS = (
     "overall",
     "branch",
     "org",
+    "org_frs",
     "manager",
     "branch_skill",
     "org_skill",
+    "org_frs_skill",
     "manager_skill",
 )
 # 每个组合真正有值的维度列；其余维度列在落盘表里是空串，出参要还原成 null。
@@ -101,9 +120,11 @@ COMBO_DIM_COLUMNS = {
     "overall": (),
     "branch": ("first_bbk_id",),
     "org": ("first_bbk_id", "org_id"),
+    "org_frs": ("first_bbk_id", "org_id"),
     "manager": ("first_bbk_id", "org_id", "user_id"),
     "branch_skill": ("first_bbk_id", "skill_id"),
     "org_skill": ("first_bbk_id", "org_id", "skill_id"),
+    "org_frs_skill": ("first_bbk_id", "org_id", "skill_id"),
     "manager_skill": (
         "first_bbk_id",
         "org_id",
@@ -126,7 +147,7 @@ FILTER_LABELS = {
 TASK_TYPE_LABELS = {
     "push_plan": "推送(名单+方案)",
     "ask_plan": "主动提问",
-    "push_other": "推送(非名单方案)",
+    "push_other": "推送(仅方案)",
 }
 OPTION_COLUMNS = {
     "branches": ("first_bbk_id", "first_bbk_nm"),
@@ -140,7 +161,8 @@ SNAPSHOT_LOGICAL_COLUMNS = (
     "prt_dt", "source_id", "rpt_combo", "task_type", "first_bbk_id",
     "org_id", "user_id", "skill_id", "first_bbk_nm", "org_nm",
     "user_name", "pst_lvl", "cn_name", "task_type_name", "skill_cnt",
-    "active_manager_cnt", "active_job_cnt", "paused_job_cnt",
+    "auth_manager_cnt", "active_manager_cnt", "new_task_manager_cnt",
+    "active_job_cnt", "paused_job_cnt", "total_execute_job",
     "suc_execute_job", "read_tasks", "read_rate", "recommended_customers",
     "read_customer_cnt", "plan_read_rate", "insight_customer_cnt",
     "click_to_insight_rate", "insight_cnt", "phone_customer_cnt",
@@ -150,9 +172,13 @@ SNAPSHOT_LOGICAL_COLUMNS = (
 SNAPSHOT_SOURCE_COLUMNS = tuple(
     _physical_column(column) for column in SNAPSHOT_LOGICAL_COLUMNS
 )
-SNAPSHOT_COLUMNS = ", ".join(
-    _select_column(column) for column in SNAPSHOT_LOGICAL_COLUMNS
-)
+
+
+def snapshot_columns(combo: str | None = None) -> str:
+    """SELECT 列集合；org_id/org_nm 的物理列随组合在零专/综合支行间切换。"""
+    return ", ".join(
+        _select_column(column, combo) for column in SNAPSHOT_LOGICAL_COLUMNS
+    )
 # 兼容响应中的 batch：按快照表日期聚合；ready 只表示已有行，不表示装载完成。
 BATCH_COLUMNS = (
     "dw_dat_dt AS prt_dt, source_id, "
@@ -177,7 +203,10 @@ FILTER_NOT_SUPPORTED_CODE = "report_filter_not_supported"
 
 def combo_of(params: SnapshotReportParams) -> str:
     """把接口参数映射成落盘表的组合标签。"""
-    return COMBO_MAP[(params.group_by, params.skill_detail)]
+    key = (params.group_by, params.skill_detail, params.org_type)
+    if params.group_by != "org":
+        key = (params.group_by, params.skill_detail, "zero_special")
+    return COMBO_MAP[key]
 
 
 def _text(value) -> str | None:
@@ -241,23 +270,6 @@ def _month_bounds(month: str) -> tuple[str, str]:
     return first.isoformat(), following.isoformat()
 
 
-def _permission_dim_columns(combo: str) -> list[str]:
-    """权限人数按名单维度统计，技能明细沿用其汇总维度。"""
-    dims = COMBO_DIM_COLUMNS[combo]
-    return [
-        column
-        for column in ("first_bbk_id", "org_id", "user_id")
-        if column in dims
-    ]
-
-
-def _permission_key(record, combo: str) -> tuple:
-    return tuple(
-        str(record.get(column) or "")
-        for column in _permission_dim_columns(combo)
-    )
-
-
 async def _load_batch(db, prt_dt: date, source_id: str) -> dict | None:
     return await db.fetch_one(
         f"SELECT {BATCH_COLUMNS} FROM {SNAPSHOT_TABLE} "
@@ -312,14 +324,73 @@ def _legacy_params(
 
 
 async def _resolve_scope(
-    db, batch: dict, params: SnapshotReportParams
+    db, batch: dict, source_id: str, params: SnapshotReportParams
 ) -> tuple[bool, dict]:
     """按跑数当天的名单做机构范围校验与名称解析。"""
     sync_date = str(batch["sync_date"])
+    if params.group_by == "org" and params.org_type == "frs":
+        return await _resolve_frs_filters(db, source_id, sync_date, params)
     legacy = _legacy_params(params, sync_date)
     """行内专属：跳过校验"""
     # await validate_roster_scope(db, sync_date, legacy)
     return await resolve_organization_filters(db, sync_date, legacy)
+
+
+async def _resolve_frs_filters(
+    db, source_id: str, sync_date: str, params: SnapshotReportParams
+) -> tuple[bool, dict]:
+    """综合支行（org_type=frs）的名称解析。
+
+    分行名称仍走名单快照（jkh_user_inf），与零专口径一致；支行名称从 org_frs
+    组合按 frs_brn_org_nm 去重解析，与 options?kind=orgs&org_type=frs 同源，
+    歧义/无匹配语义与零专一致（organization_name_ambiguous / 空结果）。
+    """
+    resolved = {"first_bbk_id": params.first_bbk_id, "org_id": params.org_id}
+    if params.first_bbk_name is not None:
+        branch_params = _legacy_params(params, sync_date).model_copy(
+            update={"org_name": None}
+        )
+        matched, resolved = await resolve_organization_filters(
+            db, sync_date, branch_params
+        )
+        if not matched:
+            return False, resolved
+    if params.org_name is not None:
+        org_id_column = _physical_column("org_id", "org_frs")
+        org_nm_column = _physical_column("org_nm", "org_frs")
+        conditions = [
+            f"{_physical_column('prt_dt')} = %s",
+            "source_id = %s",
+            "rpt_combo = %s",
+            f"{org_nm_column} = %s",
+        ]
+        values: list = [
+            params.end_date.isoformat(),
+            source_id,
+            COMBO_MAP[("org", False, "frs")],
+            params.org_name,
+        ]
+        if resolved["first_bbk_id"] is not None:
+            conditions.append(f"{_physical_column('first_bbk_id')} = %s")
+            values.append(resolved["first_bbk_id"])
+        conditions.extend(
+            [f"{org_id_column} IS NOT NULL", f"TRIM({org_id_column}) <> ''"]
+        )
+        rows = await db.fetch_all(
+            f"SELECT DISTINCT {org_id_column} AS org_id "
+            f"FROM {SNAPSHOT_TABLE} WHERE {' AND '.join(conditions)} LIMIT 2",
+            tuple(values),
+        )
+        if not rows:
+            return False, resolved
+        if len(rows) > 1:
+            raise ReportError(
+                422,
+                "organization_name_ambiguous",
+                "机构名称对应多个机构，请同时提供父分行或机构 ID。",
+            )
+        resolved["org_id"] = str(rows[0].get("org_id") or "")
+    return True, resolved
 
 
 def validate_filter_scope(group_by: str, filters: dict, user_id: str | None):
@@ -366,7 +437,7 @@ def build_filters(
         clauses.append(f"{_physical_column('first_bbk_id')} = %s")
         values.append(filters["first_bbk_id"])
     if filters.get("org_id"):
-        clauses.append(f"{_physical_column('org_id')} = %s")
+        clauses.append(f"{_physical_column('org_id', combo)} = %s")
         values.append(filters["org_id"])
     if params.user_id:
         clauses.append(f"{_physical_column('user_id')} = %s")
@@ -393,12 +464,12 @@ def order_clause(combo: str) -> str:
     parts: list[str] = []
     for column in ("first_bbk_id", "org_id"):
         if column in dims:
-            physical = _physical_column(column)
+            physical = _physical_column(column, combo)
             parts.append(f"CASE WHEN {physical} = '' THEN 1 ELSE 0 END")
             parts.append(physical)
     for column in ("user_id", "skill_id"):
         if column in dims:
-            parts.append(_physical_column(column))
+            parts.append(_physical_column(column, combo))
     parts.append(TASK_TYPE_ORDER)
     return " ORDER BY " + ", ".join(parts)
 
@@ -406,7 +477,7 @@ def order_clause(combo: str) -> str:
 async def _fetch_rows(
     db, where: str, values: list, combo: str, limit: int | None, offset: int
 ) -> list[dict]:
-    columns = SNAPSHOT_COLUMNS
+    columns = snapshot_columns(combo)
     if combo.endswith("_skill"):
         columns = columns.replace("skill_cnt, ", "")
     if combo in ("manager", "manager_skill"):
@@ -454,51 +525,6 @@ async def _collect_rows(
     return rows, len(rows), truncated
 
 
-async def _fetch_permission_counts(
-    db,
-    batch: dict,
-    source_id: str,
-    combo: str,
-    filters: dict,
-) -> dict[tuple, int]:
-    """以当前 source 的初始化来源为左表，统计当天名单中匹配的客户经理。"""
-    sync_date = str(batch.get("sync_date") or "").strip()
-    if not sync_date:
-        return {}
-    columns = _permission_dim_columns(combo)
-    select_dims = ", ".join(f"r.{column}" for column in columns)
-    clauses: list[str] = []
-    values: list = [source_id, sync_date]
-    if filters.get("first_bbk_id"):
-        clauses.append("r.first_bbk_id = %s")
-        values.append(filters["first_bbk_id"])
-    if filters.get("org_id"):
-        clauses.append("r.org_id = %s")
-        values.append(filters["org_id"])
-    if filters.get("user_id"):
-        clauses.append("r.user_id = %s")
-        values.append(filters["user_id"])
-    group_by = f" GROUP BY {', '.join(columns)}" if columns else ""
-    dims_select = select_dims or "'' AS dummy"
-    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = (
-        f"SELECT {dims_select}, "
-        "COUNT(DISTINCT r.user_id) AS permission_manager_count "
-        "FROM (SELECT DISTINCT tenant_id FROM swe_cron_jobs "
-        "WHERE status <> 'deleted' AND source_id = %s) i "
-        "LEFT JOIN jkh_user_inf r "
-        "ON i.tenant_id = r.user_id AND r.sync_date = %s "
-        "AND r.user_id <> '' "
-        f"{where}{group_by}"
-    )
-    rows = await db.fetch_all(sql, tuple(values))
-    counts: dict[tuple, int] = {}
-    for row in rows:
-        key = tuple(str(row.get(column) or "") for column in columns)
-        counts[key] = _int(row.get("permission_manager_count"))
-    return counts
-
-
 async def _fetch_skill_options(
     db, params: ReportOptionsParams, source_id: str
 ) -> ReportOptionsResponse:
@@ -515,7 +541,7 @@ async def _fetch_skill_options(
     values: list = [
         params.end_date.isoformat(),
         source_id,
-        COMBO_MAP[("skill", False)],
+        COMBO_MAP[("skill", False, "zero_special")],
     ]
     if params.first_bbk_id:
         clauses.append(f"{_physical_column('first_bbk_id')} = %s")
@@ -532,6 +558,46 @@ async def _fetch_skill_options(
             ReportOption(
                 value=str(row.get("value") or ""),
                 label=str(row.get("value") or ""),
+            )
+            for row in rows
+        ],
+    )
+
+
+async def _fetch_frs_org_options(
+    db, params: ReportOptionsParams, source_id: str
+) -> ReportOptionsResponse:
+    """综合支行选项从 org_frs 组合按 frs_brn_org_id 去重，不依赖 jkh_user_inf。"""
+    id_column = _physical_column("org_id", "org_frs")
+    name_column = _physical_column("org_nm", "org_frs")
+    clauses = [
+        f"{_physical_column('prt_dt')} = %s",
+        "source_id = %s",
+        "rpt_combo = %s",
+        f"{id_column} IS NOT NULL",
+        f"TRIM({id_column}) <> ''",
+    ]
+    values: list = [
+        params.end_date.isoformat(),
+        source_id,
+        COMBO_MAP[("org", False, "frs")],
+    ]
+    if params.first_bbk_id:
+        clauses.append(f"{_physical_column('first_bbk_id')} = %s")
+        values.append(params.first_bbk_id)
+    rows = await db.fetch_all(
+        f"SELECT {id_column} AS value, "
+        f"COALESCE(MIN(NULLIF({name_column}, '')), {id_column}) AS label "
+        f"FROM {SNAPSHOT_TABLE} WHERE {' AND '.join(clauses)} "
+        f"GROUP BY {id_column} ORDER BY {id_column}",
+        tuple(values),
+    )
+    return ReportOptionsResponse(
+        sync_date=params.end_date.isoformat(),
+        items=[
+            ReportOption(
+                value=str(row.get("value") or ""),
+                label=str(row.get("label") or row.get("value") or ""),
             )
             for row in rows
         ],
@@ -558,9 +624,7 @@ def _row_dimensions(record: dict, dims: tuple[str, ...]) -> dict:
     )
 
 
-def _to_row(
-    record: dict, combo: str, permission_counts: dict
-) -> TaskTypeReportRow:
+def _to_row(record: dict, combo: str) -> TaskTypeReportRow:
     """落盘行还原成接口行：不适用维度（'ALL' 或组合维度之外的列）置 null。"""
     dims = COMBO_DIM_COLUMNS[combo]
     has_user = "user_id" in dims
@@ -570,13 +634,17 @@ def _to_row(
         **_row_dimensions(record, dims),
         **_common_metrics(record),
         task_type=task_type,
-        task_type_name=_text(record.get("task_type_name"))
-        or TASK_TYPE_LABELS.get(task_type, task_type),
+        task_type_name=TASK_TYPE_LABELS.get(task_type, task_type),
         skill_count=None if has_skill else _int(record.get("skill_cnt")),
         permission_manager_count=(
             None
             if has_skill or has_user
-            else _int(permission_counts.get(_permission_key(record, combo)))
+            else _int(record.get("auth_manager_cnt"))
+        ),
+        new_task_manager_count=(
+            None
+            if has_skill or has_user or combo == "overall"
+            else _optional_int(record.get("new_task_manager_cnt"))
         ),
         active_manager_count=(
             None
@@ -588,6 +656,11 @@ def _to_row(
         ),
         paused_task_count=(
             _optional_int(record.get("paused_job_cnt")) if has_user else None
+        ),
+        total_execute_job=(
+            None
+            if combo == "overall" or task_type != "push_plan"
+            else _int(record.get("total_execute_job"))
         ),
         suc_execute_job=_int(record.get("suc_execute_job")),
         read_tasks=_int(record.get("read_tasks")),
@@ -695,7 +768,7 @@ class TaskTypeSnapshotService:
             params.end_date,
             source_id,
         )
-        matched, filters = await _resolve_scope(db, batch, params)
+        matched, filters = await _resolve_scope(db, batch, source_id, params)
         validate_filter_scope(params.group_by, filters, params.user_id)
         if not matched:
             return build_response(
@@ -715,15 +788,7 @@ class TaskTypeSnapshotService:
         )
         filters = dict(filters)
         filters["user_id"] = params.user_id
-        permission_counts = {}
-        if not params.skill_detail and params.group_by not in (
-            "manager",
-            "skill",
-        ):
-            permission_counts = await _fetch_permission_counts(
-                db, batch, source_id, combo, filters
-            )
-        items = [_to_row(row, combo, permission_counts) for row in rows]
+        items = [_to_row(row, combo) for row in rows]
         return build_response(
             params=params,
             source_id=source_id,
@@ -823,6 +888,8 @@ class TaskTypeSnapshotService:
         db = report_db()
         if params.kind == "skills":
             return await _fetch_skill_options(db, params, source_id)
+        if params.kind == "orgs" and params.org_type == "frs":
+            return await _fetch_frs_org_options(db, params, source_id)
         roster = await db.fetch_one(
             "SELECT COALESCE(MAX(CASE WHEN sync_date = %s "
             "THEN sync_date END), MAX(sync_date)) AS sync_date "

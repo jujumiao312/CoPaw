@@ -23,7 +23,7 @@ const skills = [
   ["demo-opportunity", "潜力客户机会识别"],
 ] as const;
 const taskTypes: TaskType[] = ["push_plan", "ask_plan", "push_other"];
-const taskNames = ["推送（名单+方案）", "主动提问", "推送（非名单方案）"];
+const taskNames = ["推送（名单+方案）", "主动提问", "推送（仅方案）"];
 /** 客户经理维度与技能维度都以客户经理为行主体，技能维度再展开到技能。 */
 const managerScoped = (group: ReportParams["group_by"]) =>
   group === "manager" || group === "skill";
@@ -98,12 +98,14 @@ export function buildTaskReportDemo(params: ReportParams): ReportResponse {
               task_type_name: taskNames[taskIndex],
               skill_count: skill ? null : skills.length,
               permission_manager_count: skill || managerName ? null : scale,
+              new_task_manager_count: skill || managerName ? null : scale,
               active_manager_count:
                 managerName || task === "ask_plan" ? null : scale,
               active_task_count:
                 managerName && task !== "ask_plan" ? scale * 3 : null,
               paused_task_count:
                 managerName && task !== "ask_plan" ? scale : null,
+              total_execute_job: task === "push_plan" ? count : null,
               suc_execute_job: successful,
               read_tasks: read,
               read_rate: Number(((read / successful) * 100).toFixed(2)),

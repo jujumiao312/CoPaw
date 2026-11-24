@@ -130,6 +130,26 @@ describe("task type report adapter", () => {
     auth.bbk = "";
     await expect(getTaskTypeReport(base)).rejects.toThrow("缺少分行身份");
   });
+  it("forwards org_type for org report queries and org options", async () => {
+    auth.bbk = "100";
+    await getTaskTypeReport({ ...base, group_by: "org", org_type: "frs" });
+    const [reportUrl] = vi.mocked(request).mock.calls[0];
+    const reportParams = new URL(String(reportUrl), "http://localhost")
+      .searchParams;
+    expect(reportParams.get("group_by")).toBe("org");
+    expect(reportParams.get("org_type")).toBe("frs");
+
+    await getTaskReportOptions({
+      end_date: base.end_date,
+      kind: "orgs",
+      org_type: "frs",
+    });
+    const calls = vi.mocked(request).mock.calls;
+    const last = calls[calls.length - 1][0];
+    const optionParams = new URL(String(last), "http://localhost").searchParams;
+    expect(optionParams.get("kind")).toBe("orgs");
+    expect(optionParams.get("org_type")).toBe("frs");
+  });
   it("exports full filters and headers, strips pagination, and rejects non-Excel replies", async () => {
     auth.bbk = "110";
     const fetchMock = vi.fn().mockResolvedValue(
@@ -148,6 +168,7 @@ describe("task type report adapter", () => {
       skill_detail: true,
       user_id: "u1",
       org_id: "11001",
+      org_type: "frs",
     });
     expect(file.size).toBeGreaterThan(0);
     const [url, options] = fetchMock.mock.calls[0];
@@ -159,6 +180,7 @@ describe("task type report adapter", () => {
     expect(params.has("page_size")).toBe(false);
     expect(params.get("user_id")).toBe("u1");
     expect(params.get("skill_detail")).toBe("true");
+    expect(params.get("org_type")).toBe("frs");
     expect(options.headers["X-Bbk-Id"]).toBe("110");
     fetchMock.mockResolvedValue(
       new Response("bad", { headers: { "Content-Type": "text/plain" } }),

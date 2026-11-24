@@ -142,9 +142,11 @@ class TaskTypeReportRow(BaseModel):
     task_type_name: str
     skill_count: Count | None
     permission_manager_count: Count | None
+    new_task_manager_count: Count | None = None
     active_manager_count: Count | None
     active_task_count: Count | None = None
     paused_task_count: Count | None = None
+    total_execute_job: Count | None = None
     suc_execute_job: Count | None
     read_tasks: Count | None
     read_rate: Percentage | None
@@ -239,6 +241,7 @@ class ReportOptionsParams(BaseModel):
     end_date: ReportDate
     kind: Literal["branches", "orgs", "skills"]
     first_bbk_id: OrganizationId | None = None
+    org_type: Literal["zero_special", "frs"] = "zero_special"
 
 
 class ReportOption(BaseModel):

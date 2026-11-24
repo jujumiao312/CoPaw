@@ -38,6 +38,7 @@ class SnapshotReportParams(BaseModel):
     start_date: ReportDate | None = None
     group_by: ReportGroupBy = "overall"
     skill_detail: bool = False
+    org_type: Literal["zero_special", "frs"] = "zero_special"
     task_type: ReportTaskType | None = None
     first_bbk_id: OrganizationId | None = None
     first_bbk_name: OrganizationName | None = None
